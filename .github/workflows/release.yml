@@ -1,0 +1,370 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Release when the workspace version has no matching tag yet. Idempotent
+      # for both push and manual dispatch (a HEAD~1 diff would miss dispatches
+      # and re-released versions).
+      - name: Read workspace version
+        id: version
+        run: |
+          VERSION=$(sed -n 's/^version = "\([0-9][^"]*\)".*/\1/p' Cargo.toml | head -1)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to release
+        id: diff
+        run: |
+          NEW="${{ steps.version.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/v${NEW}" | grep -q .; then
+            echo "v${NEW} already released — skipping."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create git tag
+        run: |
+          git tag "v${{ needs.check-version.outputs.version }}"
+          git push origin "v${{ needs.check-version.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.check-version.outputs.version }}"
+          generate_release_notes: true
+          draft: false
+
+  build:
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: macos-latest
+    # Signing creds are optional: with a Developer ID the app is signed with a
+    # hardened runtime and notarized; without them the build falls back to an
+    # ad-hoc signature (runs locally, but unsigned for distribution).
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: "v${{ needs.check-version.outputs.version }}"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Import signing certificate
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Import the Developer ID Application cert into a temporary keychain so
+          # codesign can find it. The keychain is wiped when the job ends.
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build + bundle (.app)
+        run: |
+          export CODESIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+          scripts/bundle.sh
+
+      - name: Notarize app
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent dist/Tables.app "$RUNNER_TEMP/Tables.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Tables.zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple dist/Tables.app
+
+      - name: Package (.dmg)
+        run: |
+          export CODESIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+          scripts/dmg.sh
+
+      - name: Notarize dmg
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          set -euo pipefail
+          xcrun notarytool submit dist/Tables.dmg \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple dist/Tables.dmg
+
+      - name: Verify bundle
+        run: |
+          codesign --verify --strict --verbose=2 dist/Tables.app
+          test -x dist/Tables.app/Contents/MacOS/tables
+          test -f dist/Tables.app/Contents/Resources/icon.icns
+          if [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
+            echo "::warning::Ad-hoc build — unsigned and not notarized; Gatekeeper will warn on install."
+          fi
+
+      - name: Upload DMG
+        run: gh release upload "v${{ needs.check-version.outputs.version }}" dist/Tables.dmg --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build-linux:
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: "v${{ needs.check-version.outputs.version }}"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            curl \
+            file \
+            desktop-file-utils \
+            libasound2-dev \
+            libfontconfig-dev \
+            libssl-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build + package
+        run: scripts/linux.sh ${{ matrix.arch }}
+
+      - name: Upload to release
+        run: gh release upload "v${{ needs.check-version.outputs.version }}" dist/linux/*.tar.gz dist/linux/*.deb dist/linux/*.AppImage --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  update-homebrew:
+    runs-on: ubuntu-latest
+    needs: [check-version, build]
+    if: needs.check-version.outputs.changed == 'true'
+    steps:
+      - name: Download DMG and compute SHA
+        id: shas
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          URL="https://github.com/wess/tables/releases/download/v${VERSION}/Tables.dmg"
+          for i in $(seq 1 30); do
+            if curl -fsSL -o /tmp/Tables.dmg "${URL}" 2>/dev/null; then
+              break
+            fi
+            echo "Waiting for Tables.dmg... ($i/30)"
+            sleep 10
+          done
+          SHA=$(sha256sum /tmp/Tables.dmg | cut -d' ' -f1)
+          echo "sha_darwin_arm64=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v5
+        with:
+          repository: wess/homebrew-packages
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update cask
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          mkdir -p tap/Casks
+          cat > tap/Casks/tables.rb << 'RUBY'
+          cask "tables" do
+            version "VERSION_PLACEHOLDER"
+            sha256 "SHA_DARWIN_ARM64_PLACEHOLDER"
+
+            url "https://github.com/wess/tables/releases/download/v#{version}/Tables.dmg"
+            name "Tables"
+            desc "Fast, modern database client for Postgres, MySQL, and SQLite"
+            homepage "https://github.com/wess/tables"
+
+            depends_on arch: :arm64
+            depends_on macos: :big_sur
+
+            app "Tables.app"
+
+            zap trash: [
+              "~/Library/Application Support/Tables",
+              "~/Library/Preferences/dev.tables.app.plist",
+              "~/.tables",
+            ]
+          end
+          RUBY
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" tap/Casks/tables.rb
+          sed -i "s/SHA_DARWIN_ARM64_PLACEHOLDER/${{ steps.shas.outputs.sha_darwin_arm64 }}/g" tap/Casks/tables.rb
+
+      - name: Push updated cask
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/tables.rb
+          if git diff --cached --quiet; then
+            echo "Cask unchanged — skipping push."
+          else
+            git commit -m "Update tables to v${{ needs.check-version.outputs.version }}"
+            git push
+          fi
+
+  # Windows is beta: artifacts are compile/link-verified in CI but not yet
+  # runtime-tested, and the MSI is unsigned. See packaging/README.md.
+  build-windows:
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: "v${{ needs.check-version.outputs.version }}"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build + package (.zip + .msi)
+        shell: pwsh
+        run: scripts/windows.ps1 -Arch x86_64
+
+      - name: Pack Chocolatey (.nupkg)
+        shell: pwsh
+        run: |
+          $version = "${{ needs.check-version.outputs.version }}"
+          $zip = "dist/windows/tables-$version-windows-x86_64.zip"
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          (Get-Content packaging/chocolatey/tables.nuspec) -replace '0\.0\.0', $version |
+            Set-Content packaging/chocolatey/tables.nuspec
+          (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1) -replace '0\.0\.0', $version -replace '0{64}', $sha |
+            Set-Content packaging/chocolatey/tools/chocolateyinstall.ps1
+          choco pack packaging/chocolatey/tables.nuspec --outputdirectory dist/windows
+
+      - name: Upload to release
+        shell: pwsh
+        run: |
+          $v = "${{ needs.check-version.outputs.version }}"
+          $assets = Get-ChildItem -Path dist/windows/* -Include *.zip, *.msi, *.nupkg
+          gh release upload "v$v" $assets.FullName --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Mark Windows artifacts beta in release notes (best-effort)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $v = "${{ needs.check-version.outputs.version }}"
+          $body = gh release view "v$v" --json body -q .body
+          if ($body -notmatch 'Windows builds are beta') {
+            $note = "$body`n`n---`n**Windows builds are beta** and currently unsigned (SmartScreen may warn about an unknown publisher)."
+            gh release edit "v$v" --notes $note
+          }
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # Refresh the in-repo Scoop manifest with the released zip's URL + SHA-256.
+  # Non-fatal: if pushing to a protected main is blocked, the release still
+  # succeeds and the manifest can be updated by hand (see packaging/README.md).
+  update-scoop:
+    runs-on: ubuntu-latest
+    needs: [check-version, build-windows]
+    if: needs.check-version.outputs.changed == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Update Scoop manifest
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          URL="https://github.com/wess/tables/releases/download/v${VERSION}/tables-${VERSION}-windows-x86_64.zip"
+          for i in $(seq 1 30); do
+            if curl -fsSL -o /tmp/p.zip "${URL}" 2>/dev/null; then break; fi
+            echo "Waiting for windows zip... ($i/30)"; sleep 10
+          done
+          SHA=$(sha256sum /tmp/p.zip | cut -d' ' -f1)
+          python3 - "$VERSION" "$SHA" << 'PY'
+          import json, sys
+          version, sha = sys.argv[1], sys.argv[2]
+          path = "packaging/scoop/tables.json"
+          with open(path) as f:
+              m = json.load(f)
+          m["version"] = version
+          a = m["architecture"]["64bit"]
+          a["url"] = f"https://github.com/wess/tables/releases/download/v{version}/tables-{version}-windows-x86_64.zip"
+          a["hash"] = sha
+          a["extract_dir"] = f"tables-{version}-windows-x86_64"
+          with open(path, "w") as f:
+              json.dump(m, f, indent=4)
+              f.write("\n")
+          PY
+
+      - name: Commit manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packaging/scoop/tables.json
+          if git diff --cached --quiet; then
+            echo "Scoop manifest unchanged."
+          else
+            git commit -m "Update Scoop manifest to v${{ needs.check-version.outputs.version }}"
+            git push
+          fi

@@ -1,0 +1,64 @@
+name: Linux Build
+
+# Validation build for the Linux artifacts. Runs on demand and on PRs that
+# touch the build, so the cross-platform compile and packaging are exercised
+# without cutting a release. Artifacts are uploaded to the run for download.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "assets/tables.desktop"
+      - "scripts/linux.sh"
+      - ".github/workflows/linux.yml"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            curl \
+            file \
+            desktop-file-utils \
+            libasound2-dev \
+            libfontconfig-dev \
+            libssl-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build + package
+        run: scripts/linux.sh ${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tables-linux-${{ matrix.arch }}
+          path: dist/linux/*
+          if-no-files-found: error

@@ -1,0 +1,36 @@
+name: Windows Package
+
+# Validation build for the Windows artifacts (portable .zip + MSI). Runs on
+# demand and on PRs that touch the packaging inputs, so the installer build is
+# exercised without cutting a release. Artifacts are uploaded to the run for
+# download and (crucially, until a Windows machine can smoke-test) inspection.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "scripts/windows.ps1"
+      - "packaging/**"
+      - ".github/workflows/windows-package.yml"
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build + package
+        shell: pwsh
+        run: scripts/windows.ps1 -Arch x86_64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tables-windows-x86_64
+          path: dist/windows/*
+          if-no-files-found: error

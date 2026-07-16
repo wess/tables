@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Tables MSI (WiX v4). Installs tables.exe plus the license/readme into Program
+  Files, with a Start-menu shortcut. Files come from the staging tree the build
+  script assembles (StageDir); the version is injected from the workspace
+  Cargo.toml. Both are passed with `wix build -define`. Unsigned for now —
+  installers show a SmartScreen "unknown publisher" prompt until an Authenticode
+  certificate is wired in.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Tables"
+      Manufacturer="Wess Cope"
+      Version="$(Version)"
+      UpgradeCode="B38C39BA-6804-4A58-B751-8452A5B9CCCE"
+      Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Tables is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Tables" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutDir" Name="Tables" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles">
+      <Component Directory="INSTALLFOLDER">
+        <File Id="TablesExe" Source="$(StageDir)\tables.exe" KeyPath="yes" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(StageDir)\LICENSE" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(StageDir)\README.md" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Start-menu shortcut to the app. -->
+    <Component Id="AppShortcut" Directory="AppShortcutDir">
+      <Shortcut Id="TablesStartMenu"
+                Name="Tables"
+                Target="[INSTALLFOLDER]tables.exe"
+                WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveAppShortcutDir" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\Tables" Name="installed"
+                     Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main" Title="Tables" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="AppShortcut" />
+    </Feature>
+  </Package>
+</Wix>

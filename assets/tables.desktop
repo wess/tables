@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tables
+GenericName=Database Client
+Comment=A fast, modern database client for Postgres, MySQL, and SQLite
+Exec=tables
+Icon=tables
+Terminal=false
+Categories=Development;Database;Utility;
+Keywords=database;sql;postgres;mysql;sqlite;query;
+StartupWMClass=tables
