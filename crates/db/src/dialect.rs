@@ -39,6 +39,15 @@ impl Dialect {
         }
     }
 
+    /// The positional bind placeholder for parameter `n` (1-based): `$n` on
+    /// Postgres, `?` on MySQL and SQLite.
+    pub fn placeholder(self, n: usize) -> String {
+        match self {
+            Dialect::Postgres => format!("${n}"),
+            _ => "?".to_string(),
+        }
+    }
+
     /// Quote a string literal, escaping per engine. MySQL doubles both the
     /// single quote and the backslash (its default escape character); the
     /// others double only the single quote.

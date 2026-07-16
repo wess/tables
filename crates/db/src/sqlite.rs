@@ -89,6 +89,30 @@ impl Adapter for SqliteAdapter {
         }
     }
 
+    async fn exec_params(&self, sql: &str, params: &[Value]) -> Result<RawResult, String> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard.as_mut().ok_or_else(not_connected)?;
+        if is_read(sql) {
+            let q = bind_params!(sqlx::query(sql), params);
+            let sqlite_rows = q.fetch_all(&mut *conn).await.map_err(err)?;
+            let columns = if let Some(first) = sqlite_rows.first() {
+                column_names(first)
+            } else {
+                match conn.describe(sql).await {
+                    Ok(d) => d.columns().iter().map(|c| c.name().to_string()).collect(),
+                    Err(_) => Vec::new(),
+                }
+            };
+            let rows: Vec<Row> = sqlite_rows.iter().map(row_to_map).collect();
+            let rows_affected = rows.len() as u64;
+            Ok(RawResult { columns, column_types: Map::new(), rows, rows_affected })
+        } else {
+            let q = bind_params!(sqlx::query(sql), params);
+            let done = q.execute(&mut *conn).await.map_err(err)?;
+            Ok(RawResult { rows_affected: done.rows_affected(), ..Default::default() })
+        }
+    }
+
     async fn exec_batch(&self, statements: &[String]) -> Result<u64, String> {
         let mut guard = self.conn.lock().await;
         let conn = guard.as_mut().ok_or_else(not_connected)?;
@@ -96,6 +120,22 @@ impl Adapter for SqliteAdapter {
         let mut affected = 0u64;
         for (i, stmt) in statements.iter().enumerate() {
             match sqlx::query(stmt).execute(&mut *tx).await {
+                Ok(done) => affected += done.rows_affected(),
+                Err(e) => return Err(format!("Statement {}: {}", i + 1, err(e))),
+            }
+        }
+        tx.commit().await.map_err(err)?;
+        Ok(affected)
+    }
+
+    async fn exec_batch_params(&self, batch: &[(String, Vec<Value>)]) -> Result<u64, String> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard.as_mut().ok_or_else(not_connected)?;
+        let mut tx = conn.begin().await.map_err(err)?;
+        let mut affected = 0u64;
+        for (i, (sql, params)) in batch.iter().enumerate() {
+            let q = bind_params!(sqlx::query(sql), params);
+            match q.execute(&mut *tx).await {
                 Ok(done) => affected += done.rows_affected(),
                 Err(e) => return Err(format!("Statement {}: {}", i + 1, err(e))),
             }

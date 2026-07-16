@@ -1,12 +1,15 @@
 //! Table + row handlers: introspection, paging, and row CRUD.
 
-use db::filters::build_filter_clause;
+use std::collections::HashMap;
+
+use serde_json::Value;
+
+use db::filters::build_filter_params;
 use db::Dialect;
 use model::{Row, RowWrite, RowsRequest, RowsResponse, TableInfo, TableStructure};
 use store::connections;
 
 use crate::facade::{row_i64, Host};
-use crate::values;
 
 /// Whitelist the sort direction so it can never carry injected SQL.
 fn sort_dir(dir: &str) -> &'static str {
@@ -17,42 +20,94 @@ fn sort_dir(dir: &str) -> &'static str {
     }
 }
 
-/// Render one row write to an executable statement (identifiers and values
-/// escaped through the engine's dialect). Shared by the single-row ops and the
-/// atomic reviewed batch so both build identical SQL.
-fn write_sql(dialect: Dialect, write: &RowWrite) -> String {
-    match write {
-        RowWrite::Insert { table, row } => {
-            let table = dialect.quote_ident(table);
-            if row.is_empty() {
-                return format!("INSERT INTO {table} DEFAULT VALUES");
+/// Builds a statement with placeholders, accumulating the values to bind so no
+/// user value is ever interpolated. NULL is a keyword (not a bind target); a
+/// JSON container keeps its dialect-escaped literal (Postgres coerces such a
+/// literal to jsonb, which a bound text parameter would not). Scalars bind as a
+/// placeholder cast to the column's type on Postgres (whose binds are strictly
+/// typed). The review view's human-readable SQL is rendered separately (see
+/// `app::workspace::review`).
+struct Binder<'a> {
+    dialect: Dialect,
+    col_types: &'a HashMap<String, String>,
+    params: Vec<Value>,
+}
+
+impl Binder<'_> {
+    /// The SQL token for `col`'s value: `NULL`, a jsonb-safe literal, or a bound
+    /// placeholder (cast to the column type on Postgres).
+    fn token(&mut self, col: &str, v: &Value) -> String {
+        match v {
+            Value::Null => "NULL".to_string(),
+            Value::Object(_) | Value::Array(_) => crate::values::literal(self.dialect, v),
+            scalar => {
+                self.params.push(scalar.clone());
+                let ph = self.dialect.placeholder(self.params.len());
+                match (self.dialect, self.col_types.get(col)) {
+                    (Dialect::Postgres, Some(ty)) => format!("CAST({ph} AS {ty})"),
+                    _ => ph,
+                }
             }
-            let cols = row.keys().map(|k| dialect.quote_ident(k)).collect::<Vec<_>>().join(", ");
-            let vals =
-                row.values().map(|v| values::literal(dialect, v)).collect::<Vec<_>>().join(", ");
-            format!("INSERT INTO {table} ({cols}) VALUES ({vals})")
         }
-        RowWrite::Update { table, primary_key, changes } => {
-            let set = changes
-                .iter()
-                .map(|(k, v)| format!("{} = {}", dialect.quote_ident(k), values::literal(dialect, v)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let where_clause = where_all(dialect, primary_key);
-            format!("UPDATE {} SET {set} WHERE {where_clause}", dialect.quote_ident(table))
-        }
-        RowWrite::Delete { table, primary_key } => {
-            let where_clause = where_all(dialect, primary_key);
-            format!("DELETE FROM {} WHERE {where_clause}", dialect.quote_ident(table))
-        }
+    }
+
+    /// `col = <token>`, or `col IS NULL` — the WHERE fragments for update/delete.
+    fn where_all(&mut self, key: &Row) -> String {
+        key.iter()
+            .map(|(k, v)| match v {
+                Value::Null => format!("{} IS NULL", self.dialect.quote_ident(k)),
+                other => format!("{} = {}", self.dialect.quote_ident(k), self.token(k, other)),
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ")
     }
 }
 
-fn where_all(dialect: Dialect, key: &Row) -> String {
-    key.iter()
-        .map(|(k, v)| values::where_eq(dialect, k, v))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+/// The table a write targets.
+fn write_table(write: &RowWrite) -> &str {
+    match write {
+        RowWrite::Insert { table, .. }
+        | RowWrite::Update { table, .. }
+        | RowWrite::Delete { table, .. } => table,
+    }
+}
+
+/// Build one row write as an executable statement plus its bound parameters.
+/// Shared by the single-row ops and the atomic reviewed batch.
+fn write_stmt(
+    dialect: Dialect,
+    col_types: &HashMap<String, String>,
+    write: &RowWrite,
+) -> (String, Vec<Value>) {
+    let mut b = Binder { dialect, col_types, params: Vec::new() };
+    let sql = match write {
+        RowWrite::Insert { table, row } => {
+            let table = dialect.quote_ident(table);
+            if row.is_empty() {
+                format!("INSERT INTO {table} DEFAULT VALUES")
+            } else {
+                let cols = row.keys().map(|k| dialect.quote_ident(k)).collect::<Vec<_>>().join(", ");
+                let vals = row.iter().map(|(k, v)| b.token(k, v)).collect::<Vec<_>>().join(", ");
+                format!("INSERT INTO {table} ({cols}) VALUES ({vals})")
+            }
+        }
+        RowWrite::Update { table, primary_key, changes } => {
+            // SET tokens are bound before the WHERE tokens, matching the order
+            // the placeholders appear in the statement.
+            let set = changes
+                .iter()
+                .map(|(k, v)| format!("{} = {}", dialect.quote_ident(k), b.token(k, v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let where_clause = b.where_all(primary_key);
+            format!("UPDATE {} SET {set} WHERE {where_clause}", dialect.quote_ident(table))
+        }
+        RowWrite::Delete { table, primary_key } => {
+            let where_clause = b.where_all(primary_key);
+            format!("DELETE FROM {} WHERE {where_clause}", dialect.quote_ident(table))
+        }
+    };
+    (sql, b.params)
 }
 
 impl Host {
@@ -63,18 +118,29 @@ impl Host {
         adapter.get_tables().await
     }
 
-    /// A COUNT(*) for the total, then the page. Filter values are always
-    /// string-quoted and the sort direction is interpolated raw.
+    /// A COUNT(*) for the total, then the page. Filter values are bound
+    /// parameters; the sort column is a quoted identifier and the direction is
+    /// whitelisted, so no user value is interpolated into the SQL text.
     pub async fn table_rows(&self, req: &RowsRequest) -> Result<RowsResponse, String> {
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
 
-        let where_clause = match &req.filters {
+        // Postgres binds are strictly typed, so a text-bound filter value must be
+        // cast to the column's type; fetch the column types to build those casts
+        // (empty for MySQL/SQLite, which coerce implicitly).
+        let has_filters = req.filters.as_ref().is_some_and(|f| !f.is_empty());
+        let col_types = if has_filters {
+            crate::facade::pg_col_types(&adapter, dialect, &req.table).await
+        } else {
+            HashMap::new()
+        };
+
+        let (where_clause, params) = match &req.filters {
             Some(filters) if !filters.is_empty() => {
                 let logic = req.filter_logic.as_deref().unwrap_or("and");
-                build_filter_clause(dialect, filters, logic)
+                build_filter_params(dialect, filters, logic, &col_types)
             }
-            _ => String::new(),
+            _ => (String::new(), Vec::new()),
         };
         let order_by = match &req.sort {
             Some(sort) => {
@@ -86,15 +152,18 @@ impl Host {
         let table = dialect.quote_ident(&req.table);
 
         let count = adapter
-            .query(&format!("SELECT COUNT(*) as total FROM {table} {where_clause}"))
+            .exec_params(&format!("SELECT COUNT(*) as total FROM {table} {where_clause}"), &params)
             .await?;
         let total = count.rows.first().map(|row| row_i64(row, "total")).unwrap_or(0);
 
         let result = adapter
-            .query(&format!(
-                "SELECT * FROM {table} {where_clause} {order_by} LIMIT {} OFFSET {}",
-                req.page_size, offset
-            ))
+            .exec_params(
+                &format!(
+                    "SELECT * FROM {table} {where_clause} {order_by} LIMIT {} OFFSET {}",
+                    req.page_size, offset
+                ),
+                &params,
+            )
             .await?;
 
         Ok(RowsResponse {
@@ -124,11 +193,14 @@ impl Host {
     /// An empty row inserts DEFAULT VALUES.
     pub async fn row_insert(&self, table: &str, row: &Row) -> Result<bool, String> {
         let adapter = self.active_adapter()?;
-        let sql = write_sql(
-            adapter.dialect(),
+        let dialect = adapter.dialect();
+        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let (sql, params) = write_stmt(
+            dialect,
+            &col_types,
             &RowWrite::Insert { table: table.to_string(), row: row.clone() },
         );
-        adapter.query(&sql).await?;
+        adapter.exec_params(&sql, &params).await?;
         Ok(true)
     }
 
@@ -139,35 +211,50 @@ impl Host {
         changes: &Row,
     ) -> Result<bool, String> {
         let adapter = self.active_adapter()?;
-        let sql = write_sql(
-            adapter.dialect(),
+        let dialect = adapter.dialect();
+        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let (sql, params) = write_stmt(
+            dialect,
+            &col_types,
             &RowWrite::Update {
                 table: table.to_string(),
                 primary_key: primary_key.clone(),
                 changes: changes.clone(),
             },
         );
-        adapter.query(&sql).await?;
+        adapter.exec_params(&sql, &params).await?;
         Ok(true)
     }
 
     pub async fn row_delete(&self, table: &str, primary_key: &Row) -> Result<bool, String> {
         let adapter = self.active_adapter()?;
-        let sql = write_sql(
-            adapter.dialect(),
+        let dialect = adapter.dialect();
+        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let (sql, params) = write_stmt(
+            dialect,
+            &col_types,
             &RowWrite::Delete { table: table.to_string(), primary_key: primary_key.clone() },
         );
-        adapter.query(&sql).await?;
+        adapter.exec_params(&sql, &params).await?;
         Ok(true)
     }
 
     /// Apply a reviewed batch of row writes atomically: all succeed or the whole
-    /// batch rolls back.
+    /// batch rolls back. Column types are fetched once per distinct table.
     pub async fn apply_row_writes(&self, writes: &[RowWrite]) -> Result<u64, String> {
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
-        let statements: Vec<String> = writes.iter().map(|w| write_sql(dialect, w)).collect();
-        adapter.exec_batch(&statements).await
+        let mut cache: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut batch: Vec<(String, Vec<Value>)> = Vec::with_capacity(writes.len());
+        for write in writes {
+            let table = write_table(write);
+            if !cache.contains_key(table) {
+                let types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+                cache.insert(table.to_string(), types);
+            }
+            batch.push(write_stmt(dialect, &cache[table], write));
+        }
+        adapter.exec_batch_params(&batch).await
     }
 
     /// Reads the named connection directly, not the active.
@@ -186,5 +273,93 @@ impl Host {
         self.registry.connect(&config).await?;
         self.set_active(connection_id);
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Map};
+
+    fn row(pairs: &[(&str, Value)]) -> Row {
+        let mut m = Map::new();
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        m
+    }
+
+    #[test]
+    fn insert_binds_scalars_and_keeps_null_as_keyword() {
+        let write = RowWrite::Insert {
+            table: "t".into(),
+            row: row(&[("id", json!(1)), ("name", json!("Bob")), ("note", Value::Null)]),
+        };
+        let (sql, params) = write_stmt(Dialect::Sqlite, &HashMap::new(), &write);
+        assert_eq!(sql, r#"INSERT INTO "t" ("id", "name", "note") VALUES (?, ?, NULL)"#);
+        assert_eq!(params, vec![json!(1), json!("Bob")]);
+    }
+
+    #[test]
+    fn insert_casts_each_value_on_postgres() {
+        let types = [("id", "integer"), ("name", "text")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let write = RowWrite::Insert {
+            table: "t".into(),
+            row: row(&[("id", json!(5)), ("name", json!("x"))]),
+        };
+        let (sql, params) = write_stmt(Dialect::Postgres, &types, &write);
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "t" ("id", "name") VALUES (CAST($1 AS integer), CAST($2 AS text))"#
+        );
+        assert_eq!(params, vec![json!(5), json!("x")]);
+    }
+
+    #[test]
+    fn update_binds_set_before_where() {
+        let write = RowWrite::Update {
+            table: "t".into(),
+            primary_key: row(&[("id", json!(1))]),
+            changes: row(&[("age", json!(31))]),
+        };
+        let (sql, params) = write_stmt(Dialect::Sqlite, &HashMap::new(), &write);
+        assert_eq!(sql, r#"UPDATE "t" SET "age" = ? WHERE "id" = ?"#);
+        assert_eq!(params, vec![json!(31), json!(1)]);
+    }
+
+    #[test]
+    fn delete_where_null_is_a_keyword() {
+        let write = RowWrite::Delete {
+            table: "t".into(),
+            primary_key: row(&[("id", Value::Null)]),
+        };
+        let (sql, params) = write_stmt(Dialect::Postgres, &HashMap::new(), &write);
+        assert_eq!(sql, r#"DELETE FROM "t" WHERE "id" IS NULL"#);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn crafted_value_is_bound_verbatim_not_interpolated() {
+        let write = RowWrite::Insert {
+            table: "t".into(),
+            row: row(&[("name", json!("x'); DROP TABLE t;--"))]),
+        };
+        let (sql, params) = write_stmt(Dialect::Sqlite, &HashMap::new(), &write);
+        assert_eq!(sql, r#"INSERT INTO "t" ("name") VALUES (?)"#);
+        assert_eq!(params, vec![json!("x'); DROP TABLE t;--")]);
+    }
+
+    #[test]
+    fn json_containers_stay_literal_for_jsonb_safety() {
+        let write = RowWrite::Insert {
+            table: "t".into(),
+            row: row(&[("payload", json!({"a": 1}))]),
+        };
+        let (sql, params) = write_stmt(Dialect::Postgres, &HashMap::new(), &write);
+        assert_eq!(sql, r#"INSERT INTO "t" ("payload") VALUES ('{"a":1}')"#);
+        assert!(params.is_empty());
     }
 }

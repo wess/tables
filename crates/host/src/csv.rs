@@ -1,8 +1,10 @@
 //! CSV parsing and INSERT generation.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde_json::Value;
 
 use db::Dialect;
 
@@ -86,6 +88,52 @@ pub fn csv_to_insert_sql(dialect: Dialect, table: &str, csv: &str, delimiter: &s
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("INSERT INTO {} ({cols}) VALUES ({vals})", dialect.quote_ident(table))
+        })
+        .collect()
+}
+
+/// One parameterized `INSERT` per row: each non-null field becomes a bound
+/// placeholder (never interpolated); empty / `null` maps to the SQL `NULL`
+/// keyword. Values bind as text; on Postgres each is cast to the target column's
+/// type (from `col_types`, keyed by header name) so a text bind still lands in a
+/// numeric/temporal column. MySQL and SQLite coerce implicitly, so `col_types`
+/// may be empty for them.
+pub fn csv_to_insert_params(
+    dialect: Dialect,
+    table: &str,
+    csv: &str,
+    delimiter: &str,
+    col_types: &HashMap<String, String>,
+) -> Vec<(String, Vec<Value>)> {
+    let (headers, rows) = parse_csv(csv, delimiter);
+    if headers.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = headers.iter().map(|h| h.trim().to_string()).collect();
+    let cols = names.iter().map(|h| dialect.quote_ident(h)).collect::<Vec<_>>().join(", ");
+    let quoted_table = dialect.quote_ident(table);
+
+    rows.iter()
+        .map(|row| {
+            let mut params: Vec<Value> = Vec::new();
+            let vals: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let trimmed = v.trim();
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                        return "NULL".to_string();
+                    }
+                    params.push(Value::String(trimmed.to_string()));
+                    let ph = dialect.placeholder(params.len());
+                    let cast = names.get(i).and_then(|h| col_types.get(h));
+                    match (dialect, cast) {
+                        (Dialect::Postgres, Some(ty)) => format!("CAST({ph} AS {ty})"),
+                        _ => ph,
+                    }
+                })
+                .collect();
+            (format!("INSERT INTO {quoted_table} ({cols}) VALUES ({})", vals.join(", ")), params)
         })
         .collect()
 }

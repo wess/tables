@@ -147,7 +147,7 @@ impl Host {
         })
     }
 
-    /// Inline CSV to INSERT statements, applied in order.
+    /// Inline CSV to parameterized INSERTs, applied in chunked transactions.
     pub async fn import_csv(
         &self,
         table: &str,
@@ -155,18 +155,22 @@ impl Host {
         delimiter: Option<&str>,
     ) -> Result<ImportResult, String> {
         let adapter = self.active_adapter()?;
+        let dialect = adapter.dialect();
         let delimiter = delimiter.filter(|d| !d.is_empty()).unwrap_or(",");
-        let statements = csv::csv_to_insert_sql(adapter.dialect(), table, csv, delimiter);
-        Ok(run_import(&adapter, statements).await)
+        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let batch = csv::csv_to_insert_params(dialect, table, csv, delimiter, &col_types);
+        Ok(run_import_params(&adapter, batch).await)
     }
 
     /// Read a CSV/TSV file (tab delimiter for `.tsv`).
     pub async fn import_csv_file(&self, table: &str, path: &str) -> Result<ImportResult, String> {
         let csv = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let adapter = self.active_adapter()?;
+        let dialect = adapter.dialect();
         let delimiter = if path.ends_with(".tsv") { "\t" } else { "," };
-        let statements = csv::csv_to_insert_sql(adapter.dialect(), table, &csv, delimiter);
-        Ok(run_import(&adapter, statements).await)
+        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let batch = csv::csv_to_insert_params(dialect, table, &csv, delimiter, &col_types);
+        Ok(run_import_params(&adapter, batch).await)
     }
 
     /// Generate and insert fake rows (default 10).
@@ -301,6 +305,27 @@ async fn run_import(adapter: &SharedAdapter, statements: Vec<String>) -> ImportR
     }
     ImportResult { inserted, total, error }
 }
+
+/// Chunked-transactional import of parameterized INSERTs (see `run_import`).
+async fn run_import_params(
+    adapter: &SharedAdapter,
+    batch: Vec<(String, Vec<Value>)>,
+) -> ImportResult {
+    let total = batch.len() as u64;
+    let mut inserted = 0u64;
+    let mut error = None;
+    for chunk in batch.chunks(IMPORT_CHUNK) {
+        match adapter.exec_batch_params(chunk).await {
+            Ok(_) => inserted += chunk.len() as u64,
+            Err(e) => {
+                error = Some(format!("Row {}: {e}", inserted + 1));
+                break;
+            }
+        }
+    }
+    ImportResult { inserted, total, error }
+}
+
 
 /// `(name, columns)` pairs for the real tables (not views) of a connection.
 async fn table_columns(

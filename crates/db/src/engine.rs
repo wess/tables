@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use model::{ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, RawResult, TableInfo};
+use serde_json::Value;
 
 use crate::dialect::Dialect;
 
@@ -17,9 +18,15 @@ pub trait Adapter: Send + Sync {
     async fn connect(&self) -> Result<(), String>;
     async fn disconnect(&self);
     async fn query(&self, sql: &str) -> Result<RawResult, String>;
+    /// Execute a statement with bound parameters (values sent as typed binds,
+    /// never interpolated). Reads return rows; writes return the affected count.
+    /// Placeholders are engine-specific — build the SQL with `Dialect::placeholder`.
+    async fn exec_params(&self, sql: &str, params: &[Value]) -> Result<RawResult, String>;
     /// Run every statement inside one transaction. On any failure the whole
     /// batch rolls back and an error naming the failing statement is returned.
     async fn exec_batch(&self, statements: &[String]) -> Result<u64, String>;
+    /// Like `exec_batch` but each statement carries its own bound parameters.
+    async fn exec_batch_params(&self, batch: &[(String, Vec<Value>)]) -> Result<u64, String>;
     async fn get_tables(&self) -> Result<Vec<TableInfo>, String>;
     async fn get_columns(&self, table: &str) -> Result<Vec<ColumnInfo>, String>;
     async fn get_indexes(&self, table: &str) -> Result<Vec<IndexInfo>, String>;

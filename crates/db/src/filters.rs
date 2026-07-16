@@ -2,8 +2,95 @@
 //! multi-statement splitter. Identifier and string quoting are engine-aware
 //! (see `Dialect`).
 
+use std::collections::HashMap;
+
+use serde_json::Value;
+
 use crate::dialect::Dialect;
 use model::FilterCondition;
+
+/// A bound placeholder for a compared value, cast to the column's type on
+/// Postgres so a text-bound value still matches a numeric/temporal column.
+/// MySQL and SQLite coerce a text parameter implicitly, so they never cast.
+fn typed_ph(dialect: Dialect, cast: Option<&str>, params: &mut Vec<Value>, value: &str) -> String {
+    params.push(Value::String(value.to_string()));
+    let ph = dialect.placeholder(params.len());
+    match (dialect, cast) {
+        (Dialect::Postgres, Some(ty)) => format!("CAST({ph} AS {ty})"),
+        _ => ph,
+    }
+}
+
+/// A bound placeholder for a text LIKE pattern — never cast (always compared as
+/// text).
+fn pattern_ph(dialect: Dialect, params: &mut Vec<Value>, value: String) -> String {
+    params.push(Value::String(value));
+    dialect.placeholder(params.len())
+}
+
+fn clause_params(
+    dialect: Dialect,
+    filter: &FilterCondition,
+    col_types: &HashMap<String, String>,
+    params: &mut Vec<Value>,
+) -> Option<String> {
+    let col = dialect.quote_ident(&filter.column);
+    let cast = col_types.get(&filter.column).map(String::as_str);
+    let clause = match filter.operator.as_str() {
+        "=" => format!("{col} = {}", typed_ph(dialect, cast, params, &filter.value)),
+        "!=" => format!("{col} != {}", typed_ph(dialect, cast, params, &filter.value)),
+        ">" => format!("{col} > {}", typed_ph(dialect, cast, params, &filter.value)),
+        "<" => format!("{col} < {}", typed_ph(dialect, cast, params, &filter.value)),
+        ">=" => format!("{col} >= {}", typed_ph(dialect, cast, params, &filter.value)),
+        "<=" => format!("{col} <= {}", typed_ph(dialect, cast, params, &filter.value)),
+        "contains" => format!("{col} LIKE {}", pattern_ph(dialect, params, format!("%{}%", filter.value))),
+        "not_contains" => {
+            format!("{col} NOT LIKE {}", pattern_ph(dialect, params, format!("%{}%", filter.value)))
+        }
+        "starts_with" => format!("{col} LIKE {}", pattern_ph(dialect, params, format!("{}%", filter.value))),
+        "ends_with" => format!("{col} LIKE {}", pattern_ph(dialect, params, format!("%{}", filter.value))),
+        "is_null" => format!("{col} IS NULL"),
+        "is_not_null" => format!("{col} IS NOT NULL"),
+        "in" => {
+            let items: Vec<String> = filter
+                .value
+                .split(',')
+                .map(|s| typed_ph(dialect, cast, params, s.trim()))
+                .collect();
+            format!("{col} IN ({})", items.join(", "))
+        }
+        "between" => {
+            let v2 = filter.value2.clone().unwrap_or_default();
+            let lo = typed_ph(dialect, cast, params, &filter.value);
+            let hi = typed_ph(dialect, cast, params, &v2);
+            format!("{col} BETWEEN {lo} AND {hi}")
+        }
+        _ => return None,
+    };
+    Some(clause)
+}
+
+/// The parameterized `WHERE …` clause for row browsing plus the values to bind,
+/// in order. User values become bound parameters, never interpolated. Returns
+/// an empty clause (and no params) when nothing applies. `col_types` maps column
+/// name → Postgres type and is consulted only for Postgres (see [`typed_ph`]).
+pub fn build_filter_params(
+    dialect: Dialect,
+    filters: &[FilterCondition],
+    logic: &str,
+    col_types: &HashMap<String, String>,
+) -> (String, Vec<Value>) {
+    let mut params: Vec<Value> = Vec::new();
+    let clauses: Vec<String> = filters
+        .iter()
+        .filter_map(|f| clause_params(dialect, f, col_types, &mut params))
+        .collect();
+    if clauses.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let joiner = if logic == "or" { " OR " } else { " AND " };
+    (format!("WHERE {}", clauses.join(joiner)), params)
+}
 
 fn clause(dialect: Dialect, filter: &FilterCondition) -> String {
     let col = dialect.quote_ident(&filter.column);
@@ -151,6 +238,7 @@ pub fn split_statements(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn f(column: &str, operator: &str, value: &str) -> FilterCondition {
         FilterCondition {
@@ -277,6 +365,72 @@ mod tests {
     #[test]
     fn empty_filters_yield_empty_string() {
         assert_eq!(build_filter_clause(PG, &[], "and"), "");
+    }
+
+    fn pg_types() -> HashMap<String, String> {
+        [("age", "integer"), ("name", "text")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn params_bind_values_and_cast_on_postgres() {
+        let (clause, params) = build_filter_params(PG, &[f("age", "=", "30")], "and", &pg_types());
+        assert_eq!(clause, "WHERE \"age\" = CAST($1 AS integer)");
+        assert_eq!(params, vec![json!("30")]);
+    }
+
+    #[test]
+    fn params_do_not_cast_on_mysql_or_sqlite() {
+        let empty = HashMap::new();
+        let (clause, params) = build_filter_params(MY, &[f("age", "=", "30")], "and", &empty);
+        assert_eq!(clause, "WHERE `age` = ?");
+        assert_eq!(params, vec![json!("30")]);
+    }
+
+    #[test]
+    fn params_number_placeholders_sequentially_on_postgres() {
+        let filters = [f("age", ">", "18"), f("name", "=", "Bob")];
+        let (clause, params) = build_filter_params(PG, &filters, "and", &pg_types());
+        assert_eq!(clause, "WHERE \"age\" > CAST($1 AS integer) AND \"name\" = CAST($2 AS text)");
+        assert_eq!(params, vec![json!("18"), json!("Bob")]);
+    }
+
+    #[test]
+    fn params_like_binds_the_pattern_uncast() {
+        let (clause, params) = build_filter_params(PG, &[f("name", "contains", "x")], "and", &pg_types());
+        assert_eq!(clause, "WHERE \"name\" LIKE $1");
+        assert_eq!(params, vec![json!("%x%")]);
+    }
+
+    #[test]
+    fn params_in_and_between_bind_each_value() {
+        let (clause, params) = build_filter_params(MY, &[f("age", "in", "1, 2 ,3")], "and", &HashMap::new());
+        assert_eq!(clause, "WHERE `age` IN (?, ?, ?)");
+        assert_eq!(params, vec![json!("1"), json!("2"), json!("3")]);
+
+        let mut between = f("age", "between", "18");
+        between.value2 = Some("65".into());
+        let (clause, params) = build_filter_params(MY, &[between], "and", &HashMap::new());
+        assert_eq!(clause, "WHERE `age` BETWEEN ? AND ?");
+        assert_eq!(params, vec![json!("18"), json!("65")]);
+    }
+
+    #[test]
+    fn params_null_checks_bind_nothing() {
+        let (clause, params) = build_filter_params(PG, &[f("name", "is_null", "junk")], "and", &pg_types());
+        assert_eq!(clause, "WHERE \"name\" IS NULL");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn params_carry_a_crafted_value_verbatim_never_interpolated() {
+        // A bound value is never escaped or spliced into SQL — it rides in params.
+        let (clause, params) =
+            build_filter_params(PG, &[f("name", "=", "x' OR '1'='1")], "and", &pg_types());
+        assert_eq!(clause, "WHERE \"name\" = CAST($1 AS text)");
+        assert_eq!(params, vec![json!("x' OR '1'='1")]);
     }
 
     #[test]

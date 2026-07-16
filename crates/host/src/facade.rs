@@ -4,9 +4,10 @@
 //! live-connection registry, the health monitor, and the "active connection"
 //! cursor. Every method mirrors one operation of the original IPC surface.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use db::{HealthMonitor, Registry, SharedAdapter};
+use db::{Dialect, HealthMonitor, Registry, SharedAdapter};
 use model::{ConnectionTestResult, Row, StoredConnection};
 use store::{connections, keychain};
 
@@ -158,6 +159,24 @@ impl Host {
     pub fn is_connected(&self, id: &str) -> bool {
         self.registry.is_connected(id)
     }
+}
+
+/// The target table's `column name → type` map, used to cast bound values to
+/// the column type on Postgres (whose binds are strictly typed). Empty for
+/// MySQL/SQLite — they coerce a text parameter implicitly — and on failure.
+pub(crate) async fn pg_col_types(
+    adapter: &SharedAdapter,
+    dialect: Dialect,
+    table: &str,
+) -> HashMap<String, String> {
+    if dialect != Dialect::Postgres {
+        return HashMap::new();
+    }
+    adapter
+        .get_columns(table)
+        .await
+        .map(|cols| cols.into_iter().map(|c| (c.name, c.data_type)).collect())
+        .unwrap_or_default()
 }
 
 /// `Number(row[key] ?? 0)` for a driver cell — numbers pass through, numeric

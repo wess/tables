@@ -110,12 +110,41 @@ impl Adapter for PostgresAdapter {
         }
     }
 
+    async fn exec_params(&self, sql: &str, params: &[Value]) -> Result<RawResult, String> {
+        let pool = self.pool()?;
+        if is_read(sql) {
+            let q = bind_params!(sqlx::query(sql), params);
+            let rows = q.fetch_all(&pool).await.map_err(err)?;
+            let columns = pg_columns(&pool, &rows, sql).await;
+            Ok(read_result(&rows, columns))
+        } else {
+            let q = bind_params!(sqlx::query(sql), params);
+            let done = q.execute(&pool).await.map_err(err)?;
+            Ok(RawResult { rows_affected: done.rows_affected(), ..Default::default() })
+        }
+    }
+
     async fn exec_batch(&self, statements: &[String]) -> Result<u64, String> {
         let pool = self.pool()?;
         let mut tx = pool.begin().await.map_err(err)?;
         let mut affected = 0u64;
         for (i, stmt) in statements.iter().enumerate() {
             match sqlx::query(stmt).execute(&mut *tx).await {
+                Ok(done) => affected += done.rows_affected(),
+                Err(e) => return Err(format!("Statement {}: {}", i + 1, err(e))),
+            }
+        }
+        tx.commit().await.map_err(err)?;
+        Ok(affected)
+    }
+
+    async fn exec_batch_params(&self, batch: &[(String, Vec<Value>)]) -> Result<u64, String> {
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await.map_err(err)?;
+        let mut affected = 0u64;
+        for (i, (sql, params)) in batch.iter().enumerate() {
+            let q = bind_params!(sqlx::query(sql), params);
+            match q.execute(&mut *tx).await {
                 Ok(done) => affected += done.rows_affected(),
                 Err(e) => return Err(format!("Statement {}: {}", i + 1, err(e))),
             }
