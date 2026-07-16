@@ -72,29 +72,39 @@ impl DataPanel {
         let Some(table) = self.state.active_table.get(cx) else {
             return;
         };
+        self.busy.set(cx, true);
         let host = self.app.host.clone();
         let toasts = self.app.toasts.clone();
         let state = self.state.clone();
+        let busy = self.busy.clone();
         bridge::run(
             cx,
             async move { host.mock_data(&table, 50).await },
-            move |result, cx| match result {
-                Ok(outcome) => {
-                    state.bump_rows(cx);
-                    match outcome.error {
-                        Some(error) => toasts.warn(
-                            cx,
-                            "Partial generation",
-                            &format!("{}/{} rows. {error}", outcome.inserted, outcome.total),
-                        ),
-                        None => toasts.success(
-                            cx,
-                            &format!("{} mock rows generated", outcome.inserted),
-                            2000,
-                        ),
+            move |result, cx| {
+                busy.set(cx, false);
+                match result {
+                    Ok(outcome) => {
+                        state.bump_rows(cx);
+                        match outcome.error {
+                            Some(error) => toasts.warn(
+                                cx,
+                                "Partial generation",
+                                &format!("{}/{} rows. {error}", outcome.inserted, outcome.total),
+                            ),
+                            None if outcome.inserted == 0 => toasts.warn(
+                                cx,
+                                "Nothing generated",
+                                "No rows were generated for this table.",
+                            ),
+                            None => toasts.success(
+                                cx,
+                                &format!("{} mock rows generated", outcome.inserted),
+                                2000,
+                            ),
+                        }
                     }
+                    Err(error) => toasts.error(cx, "Generation failed", &error),
                 }
-                Err(error) => toasts.error(cx, "Generation failed", &error),
             },
         );
     }
@@ -194,6 +204,7 @@ impl DataPanel {
         let host = self.app.host.clone();
         let state = self.state.clone();
         let toasts = self.app.toasts.clone();
+        let busy = self.busy.clone();
         cx.spawn(async move |cx| {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
@@ -203,26 +214,30 @@ impl DataPanel {
             };
             let path = path.to_string_lossy().into_owned();
             let _ = cx.update(|cx| {
+                busy.set(cx, true);
                 bridge::run(
                     cx,
                     async move { host.import_csv_file(&table, &path).await },
-                    move |result, cx| match result {
-                        Ok(r) => {
-                            state.bump_rows(cx);
-                            match r.error {
-                                Some(e) => toasts.warn(
-                                    cx,
-                                    "Partial import",
-                                    &format!("{}/{} rows. {e}", r.inserted, r.total),
-                                ),
-                                None => toasts.success(
-                                    cx,
-                                    &format!("{} row(s) imported", r.inserted),
-                                    2000,
-                                ),
+                    move |result, cx| {
+                        busy.set(cx, false);
+                        match result {
+                            Ok(r) => {
+                                state.bump_rows(cx);
+                                match r.error {
+                                    Some(e) => toasts.warn(
+                                        cx,
+                                        "Partial import",
+                                        &format!("{}/{} rows. {e}", r.inserted, r.total),
+                                    ),
+                                    None => toasts.success(
+                                        cx,
+                                        &format!("{} row(s) imported", r.inserted),
+                                        2000,
+                                    ),
+                                }
                             }
+                            Err(e) => toasts.error(cx, "Import failed", &e),
                         }
-                        Err(e) => toasts.error(cx, "Import failed", &e),
                     },
                 );
             });
@@ -239,6 +254,7 @@ impl DataPanel {
         let rx = cx.prompt_for_new_path(&dir, Some(&format!("{table}.csv")));
         let host = self.app.host.clone();
         let toasts = self.app.toasts.clone();
+        let busy = self.busy.clone();
         cx.spawn(async move |cx| {
             let Ok(Ok(Some(path))) = rx.await else {
                 return;
@@ -253,14 +269,20 @@ impl DataPanel {
             }
             .to_string();
             let _ = cx.update(|cx| {
+                busy.set(cx, true);
                 bridge::run(
                     cx,
                     async move {
                         host.export_file(&table, &format, Some(&path), &serde_json::Map::new()).await
                     },
-                    move |result, cx| match result {
-                        Ok(r) => toasts.success(cx, &format!("Exported {} row(s)", r.rows), 2000),
-                        Err(e) => toasts.error(cx, "Export failed", &e),
+                    move |result, cx| {
+                        busy.set(cx, false);
+                        match result {
+                            Ok(r) => {
+                                toasts.success(cx, &format!("Exported {} row(s)", r.rows), 2000)
+                            }
+                            Err(e) => toasts.error(cx, "Export failed", &e),
+                        }
                     },
                 );
             });

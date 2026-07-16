@@ -69,6 +69,10 @@ impl ChartModal {
         let kind = Signal::new(cx, Kind::Bar);
         watch(cx, &kind);
 
+        // Redraw when the Labels/Values column selection changes.
+        cx.subscribe(&label_col, |_this, _sel, _e: &SelectEvent, cx| cx.notify()).detach();
+        cx.subscribe(&value_col, |_this, _sel, _e: &SelectEvent, cx| cx.notify()).detach();
+
         ChartModal { columns, rows, label_col, value_col, kind }
     }
 

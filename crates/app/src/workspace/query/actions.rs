@@ -69,6 +69,7 @@ impl QueryPanel {
             move |result, cx| match result {
                 Ok(_) => {
                     fav_name.update(cx, |i, cx| i.set_text("", cx));
+                    toasts.success(cx, "Favorite saved", 1500);
                     let host = AppState::get(cx).host;
                     bridge::run(
                         cx,

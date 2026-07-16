@@ -80,6 +80,7 @@ impl QueryPanel {
                         .child(
                             Button::new("fav-save", "Save")
                                 .size(Size::Xs)
+                                .disabled(self.fav_name.read(cx).text().trim().is_empty())
                                 .on_click(cx.listener(|this, _, _, cx| this.save_current_favorite(cx))),
                         ),
                 );

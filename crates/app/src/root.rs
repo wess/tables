@@ -61,7 +61,13 @@ impl Render for Root {
             .size_full()
             .bg(body)
             .text_color(text)
-            .font_family(font);
+            .font_family(font)
+            // File → New Connection / cmd-n: go home and open the form.
+            .on_action(cx.listener(|this, _: &crate::NewConnection, _, cx| {
+                this.state.route.set(cx, Route::Home);
+                this.home.update(cx, |home, cx| home.open_form(None, cx));
+                cx.notify();
+            }));
 
         match self.state.route.get(cx) {
             Route::Home => {

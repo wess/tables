@@ -44,6 +44,8 @@ impl SchemaCompareModal {
         let comparing = Signal::new(cx, false);
         watch(cx, &diffs);
         watch(cx, &comparing);
+        // Re-render when a target is picked so the Compare button enables.
+        cx.subscribe(&target, |_this, _sel, _e: &SelectEvent, cx| cx.notify()).detach();
         SchemaCompareModal { app, source_id, targets, target, diffs, comparing }
     }
 
@@ -82,6 +84,7 @@ impl Render for SchemaCompareModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         let comparing = *self.comparing.read(cx);
+        let no_target = self.target.read(cx).selected_index().is_none();
 
         let controls = Group::new()
             .gap(Size::Xs)
@@ -89,7 +92,7 @@ impl Render for SchemaCompareModal {
             .child(div().flex_1().child(self.target.clone()))
             .child(
                 Button::new("compare-run", if comparing { "Comparing…" } else { "Compare" })
-                    .disabled(comparing)
+                    .disabled(comparing || no_target)
                     .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
             );
 

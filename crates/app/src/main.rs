@@ -54,6 +54,25 @@ pub struct HideOthers;
 #[action(namespace = tables, no_json)]
 pub struct ShowAll;
 
+// Standard edit-menu actions. They carry the OS role (cut/copy/paste/select-all)
+// so the menu integrates with the focused text field; the app dispatches no
+// handler for them (text inputs handle the clipboard via their own keybindings).
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = tables, no_json)]
+pub struct Cut;
+
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = tables, no_json)]
+pub struct Copy;
+
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = tables, no_json)]
+pub struct Paste;
+
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = tables, no_json)]
+pub struct SelectAll;
+
 /// The native menu bar. Custom items are UI-handled; only Quit / Hide act here.
 fn menus() -> Vec<Menu> {
     vec![
@@ -78,10 +97,10 @@ fn menus() -> Vec<Menu> {
         Menu {
             name: SharedString::new_static("Edit"),
             items: vec![
-                MenuItem::os_action("Cut", Quit, OsAction::Cut),
-                MenuItem::os_action("Copy", Quit, OsAction::Copy),
-                MenuItem::os_action("Paste", Quit, OsAction::Paste),
-                MenuItem::os_action("Select All", Quit, OsAction::SelectAll),
+                MenuItem::os_action("Cut", Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
             ],
         },
         Menu {

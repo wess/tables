@@ -13,6 +13,7 @@ impl DataPanel {
     pub(super) fn toolbar(&self, cx: &mut Context<Self>, border: Hsla) -> impl IntoElement {
         let has_selection = !self.state.selection.read(cx).is_empty();
         let pending = self.state.pending.read(cx).len();
+        let busy = *self.busy.read(cx);
 
         let mut actions = Group::new()
             .gap(Size::Xs)
@@ -38,9 +39,10 @@ impl DataPanel {
                     .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
             )
             .child(
-                Button::new("data-mock", "Generate")
+                Button::new("data-mock", if busy { "Generating…" } else { "Generate" })
                     .size(Size::Xs)
                     .variant(Variant::Subtle)
+                    .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.generate_data(cx))),
             )
             .child(Divider::vertical())
@@ -80,14 +82,30 @@ impl DataPanel {
                 Button::new("data-import", "Import")
                     .size(Size::Xs)
                     .variant(Variant::Subtle)
+                    .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.import_csv(cx))),
             )
             .child(
                 Button::new("data-export", "Export")
                     .size(Size::Xs)
                     .variant(Variant::Subtle)
+                    .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.export_table(cx))),
             );
+
+        // A single spinner for any in-flight work: toolbar actions (busy) or a
+        // row fetch (table select / refresh / page / sort / filter).
+        let loading = *self.state.rows_loading.read(cx);
+        if busy || loading {
+            let label = if busy { "Working…" } else { "Loading…" };
+            actions = actions.child(
+                Group::new()
+                    .gap(Size::Xs)
+                    .align(Align::Center)
+                    .child(Loader::new().size(Size::Xs))
+                    .child(Text::new(label).size(Size::Xs).dimmed()),
+            );
+        }
 
         if pending > 0 {
             actions = actions

@@ -28,6 +28,9 @@ pub struct DataPanel {
     insert: Option<Entity<InsertModal>>,
     show_review: bool,
     committing: Signal<bool>,
+    /// True while an async toolbar action (generate / import / export) runs, so
+    /// the toolbar can show a spinner and disable those buttons.
+    busy: Signal<bool>,
 }
 
 impl DataPanel {
@@ -40,6 +43,8 @@ impl DataPanel {
         watch(cx, &state.inspector_open);
         let committing = Signal::new(cx, false);
         watch(cx, &committing);
+        let busy = Signal::new(cx, false);
+        watch(cx, &busy);
 
         let grid = {
             let (app, state) = (app.clone(), state.clone());
@@ -56,7 +61,16 @@ impl DataPanel {
             fetch_rows(&effect_app, &effect_state, cx);
         });
 
-        DataPanel { app, state, grid, filter, insert: None, show_review: false, committing }
+        DataPanel {
+            app,
+            state,
+            grid,
+            filter,
+            insert: None,
+            show_review: false,
+            committing,
+            busy,
+        }
     }
 
     fn page_size(&self, cx: &gpui::App) -> u64 {

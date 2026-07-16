@@ -91,6 +91,12 @@ impl QueryPanel {
         self.run(sql, cx);
     }
 
+    /// Run whatever is currently in the editor (the Query → Execute action).
+    pub fn run_current(&self, cx: &mut gpui::App) {
+        let sql = self.editor.read(cx).text();
+        self.run(sql, cx);
+    }
+
     fn run(&self, sql: String, cx: &mut gpui::App) {
         if sql.trim().is_empty() {
             return;
@@ -161,7 +167,7 @@ impl Render for QueryPanel {
                     .child(
                         Button::new("query-run", if running { "Running…" } else { "Run" })
                             .size(Size::Xs)
-                            .disabled(running)
+                            .disabled(running || self.editor.read(cx).text().trim().is_empty())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let sql = this.editor.read(cx).text();
                                 this.run(sql, cx);

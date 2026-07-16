@@ -38,6 +38,7 @@ pub struct ConnectionForm {
     startup: Entity<TextArea>,
     safe_mode: Entity<Select>,
     test_result: Signal<Option<ConnectionTestResult>>,
+    testing: Signal<bool>,
 }
 
 impl EventEmitter<ConnectionFormEvent> for ConnectionForm {}
@@ -140,6 +141,8 @@ impl ConnectionForm {
 
         let test_result = Signal::new(cx, None::<ConnectionTestResult>);
         watch(cx, &test_result);
+        let testing = Signal::new(cx, false);
+        watch(cx, &testing);
         // Re-render the form when the type changes so the sqlite/server fields swap.
         cx.subscribe(&kind, |_this, _select, _event: &SelectEvent, cx| cx.notify())
             .detach();
@@ -161,6 +164,7 @@ impl ConnectionForm {
             startup,
             safe_mode,
             test_result,
+            testing,
         }
     }
 
@@ -218,10 +222,16 @@ impl ConnectionForm {
         let conn = self.build(cx);
         let host = self.state.host.clone();
         let result = self.test_result.clone();
+        let testing = self.testing.clone();
+        self.testing.set(cx, true);
+        self.test_result.set(cx, None); // clear any stale result while testing
         bridge::run(
             cx,
             async move { host.test_connection(&conn).await },
-            move |outcome, cx| result.set(cx, Some(outcome)),
+            move |outcome, cx| {
+                testing.set(cx, false);
+                result.set(cx, Some(outcome));
+            },
         );
     }
 }
@@ -230,6 +240,7 @@ impl Render for ConnectionForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_sqlite = self.is_sqlite(cx);
         let editing = self.initial.is_some();
+        let testing = *self.testing.read(cx);
 
         let mut fields = Stack::new().gap(Size::Sm).child(
             Group::new()
@@ -288,8 +299,9 @@ impl Render for ConnectionForm {
         let actions = Group::new()
             .justify(Justify::Between)
             .child(
-                Button::new("form-test", "Test")
+                Button::new("form-test", if testing { "Testing…" } else { "Test" })
                     .variant(Variant::Default)
+                    .disabled(testing)
                     .on_click(cx.listener(|this, _, _, cx| this.test(cx))),
             )
             .child(

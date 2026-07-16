@@ -398,6 +398,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &crate::OpenPalette, window, cx| {
                 this.open_palette(window, cx)
             }))
+            // Query → Execute Query: switch to the Query tab and run the editor.
+            .on_action(cx.listener(|this, _: &crate::RunQuery, _, cx| {
+                this.state.active_tab.set(cx, WorkspaceTab::Query);
+                this.query.update(cx, |q, cx| q.run_current(cx));
+                cx.notify();
+            }))
             .child(sidebar_col)
             .child(main_col);
         if ai_open {
