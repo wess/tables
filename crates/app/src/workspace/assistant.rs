@@ -275,11 +275,24 @@ impl Render for AssistantPanel {
             .border_color(colors.border)
             .child(Text::new("AI Assistant").size(Size::Xs).medium())
             .child(
-                Button::new("ai-clear", "Clear")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .disabled(messages.is_empty())
-                    .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
+                Group::new()
+                    .gap(Size::Xs)
+                    .align(Align::Center)
+                    .child(
+                        Button::new("ai-clear", "Clear")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .disabled(messages.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
+                    )
+                    .child(
+                        ActionIcon::new("ai-close", "✕")
+                            .variant(Variant::Subtle)
+                            .size(Size::Sm)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.ai_open.set(cx, false)
+                            })),
+                    ),
             );
 
         let body = if messages.is_empty() {

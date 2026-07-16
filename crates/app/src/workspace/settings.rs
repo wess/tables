@@ -5,6 +5,7 @@ use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Window};
 use guise::prelude::*;
 
+use crate::sheet::Sheet;
 use crate::state::AppState;
 use model::Settings;
 
@@ -262,7 +263,7 @@ impl Render for SettingsModal {
                 Button::new("settings-save", "Save").on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             );
 
-        Modal::new()
+        Sheet::new()
             .title("Settings")
             .width(520.0)
             .on_close(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Close)))

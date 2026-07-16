@@ -9,6 +9,7 @@ use gpui::{canvas, div, point, px, Context, Entity, EventEmitter, Hsla, PathBuil
 use guise::prelude::*;
 use serde_json::Value;
 
+use crate::sheet::Sheet;
 use model::Row;
 
 pub enum ChartEvent {
@@ -270,7 +271,7 @@ impl Render for ChartModal {
             }
         };
 
-        Modal::new()
+        Sheet::new()
             .title("Chart")
             .width(680.0)
             .on_close(cx.listener(|_, _, _, cx| cx.emit(ChartEvent::Close)))

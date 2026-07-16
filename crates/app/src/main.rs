@@ -7,6 +7,7 @@
 mod bridge;
 mod home;
 mod root;
+mod sheet;
 mod theme;
 mod workspace;
 

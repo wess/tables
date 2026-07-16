@@ -1,0 +1,15 @@
+{
+  "theme": "dark",
+  "editorFontSize": 13,
+  "editorTabSize": 2,
+  "editorWordWrap": true,
+  "editorLineNumbers": true,
+  "gridRowHeight": "compact",
+  "gridPageSize": 100,
+  "gridShowRowNumbers": true,
+  "gridAlternateRows": true,
+  "dateFormat": "ISO 8601",
+  "nullDisplay": "NULL",
+  "aiModel": "claude-opus-4-8",
+  "aiAuthMode": "apiKey"
+}

@@ -7,6 +7,7 @@ use gpui::{div, px, Context, Entity, EventEmitter, Window};
 use guise::prelude::*;
 
 use crate::bridge;
+use crate::sheet::Sheet;
 use crate::state::AppState;
 use model::{SchemaDiff, StoredConnection};
 
@@ -137,7 +138,7 @@ impl Render for SchemaCompareModal {
             }
         };
 
-        Modal::new()
+        Sheet::new()
             .title("Schema Comparison")
             .width(680.0)
             .on_close(cx.listener(|_, _, _, cx| cx.emit(SchemaCompareEvent::Close)))

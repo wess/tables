@@ -27,6 +27,13 @@ impl Root {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let host = Arc::new(Host::new());
         let settings = host.settings();
+        // Materialize settings.json on first run so there is a real file to edit
+        // (the loader otherwise merges defaults in memory without writing).
+        if host.settings_raw().is_none() {
+            if let Ok(value) = serde_json::to_value(&settings) {
+                host.save_settings(&value);
+            }
+        }
         let state = AppState {
             host,
             route: Signal::new(cx, Route::Home),
