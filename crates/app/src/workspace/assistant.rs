@@ -4,17 +4,67 @@
 //! or subscription token) from the OS keychain via the host.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, Window};
+use gpui::{div, px, Context, Entity, EventEmitter, Window};
 use guise::prelude::*;
 
 use crate::bridge;
 use crate::state::{AppState, WorkspaceState};
 use ai::{AiConfig, AuthMode, Message as AiMessage, Role, StreamEvent};
 
+/// The assistant asks the workspace to act on a SQL block it produced.
+pub enum AssistantEvent {
+    /// Load the SQL into the Query editor and run it.
+    RunSql(String),
+    /// Load the SQL into the Query editor without running it.
+    InsertSql(String),
+}
+
 #[derive(Clone)]
 struct ChatMsg {
     role: Role,
     text: String,
+}
+
+/// A parsed piece of an assistant message: prose, or a fenced code block.
+enum Segment {
+    Text(String),
+    Code { runnable: bool, code: String },
+}
+
+/// Split assistant text into prose and fenced code blocks. A block tagged `sql`
+/// (or untagged) is `runnable`; another language is shown but not offered to
+/// run. An unterminated block (still streaming) is not yet runnable.
+fn segments(text: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut prose = String::new();
+    let mut code: Option<(bool, String)> = None;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if let Some((_, acc)) = code.as_mut() {
+            if bare.trim_start().starts_with("```") {
+                let (runnable, acc) = code.take().unwrap();
+                out.push(Segment::Code { runnable, code: acc.trim_end().to_string() });
+            } else {
+                acc.push_str(line);
+            }
+        } else if let Some(rest) = bare.trim_start().strip_prefix("```") {
+            let prose = std::mem::take(&mut prose);
+            if !prose.trim().is_empty() {
+                out.push(Segment::Text(prose.trim().to_string()));
+            }
+            let lang = rest.trim().to_lowercase();
+            code = Some((lang.is_empty() || lang == "sql", String::new()));
+        } else {
+            prose.push_str(line);
+        }
+    }
+    // A block still open at the end is mid-stream: show it, don't offer to run.
+    if let Some((_, acc)) = code {
+        out.push(Segment::Code { runnable: false, code: acc.trim_end().to_string() });
+    } else if !prose.trim().is_empty() {
+        out.push(Segment::Text(prose.trim().to_string()));
+    }
+    out
 }
 
 pub struct AssistantPanel {
@@ -24,6 +74,8 @@ pub struct AssistantPanel {
     messages: Signal<Vec<ChatMsg>>,
     streaming: Signal<bool>,
 }
+
+impl EventEmitter<AssistantEvent> for AssistantPanel {}
 
 impl AssistantPanel {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
@@ -132,6 +184,69 @@ impl AssistantPanel {
     fn clear(&self, cx: &mut gpui::App) {
         self.messages.set(cx, Vec::new());
     }
+
+    /// Render one message's body: prose plus fenced code blocks, with Run/Insert
+    /// actions on runnable SQL. `msg_idx` keys the buttons' element ids.
+    fn message_body(&self, msg_idx: usize, text: &str, cx: &Context<Self>) -> gpui::AnyElement {
+        let colors = crate::theme::palette(cx);
+        let mut stack = Stack::new().gap(Size::Xs);
+        for (block, seg) in segments(text).into_iter().enumerate() {
+            match seg {
+                Segment::Text(t) => {
+                    stack = stack.child(
+                        div().text_size(px(12.0)).child(gpui::SharedString::from(t)),
+                    );
+                }
+                Segment::Code { runnable, code } => {
+                    let mut card = div()
+                        .p(px(8.0))
+                        .rounded(px(4.0))
+                        .bg(colors.bg_surface)
+                        .border_1()
+                        .border_color(colors.border)
+                        .child(
+                            div()
+                                .id(gpui::SharedString::from(format!("ai-code-{msg_idx}-{block}")))
+                                .overflow_x_scroll()
+                                .font_family(crate::theme::MONO_FAMILY)
+                                .text_size(px(11.0))
+                                .child(gpui::SharedString::from(code.clone())),
+                        );
+                    if runnable {
+                        let run_code = code.clone();
+                        let ins_code = code;
+                        card = card.child(
+                            Group::new()
+                                .gap(Size::Xs)
+                                .child(
+                                    Button::new(
+                                        gpui::SharedString::from(format!("ai-run-{msg_idx}-{block}")),
+                                        "Run",
+                                    )
+                                    .size(Size::Xs)
+                                    .on_click(cx.listener(move |_this, _, _, cx| {
+                                        cx.emit(AssistantEvent::RunSql(run_code.clone()));
+                                    })),
+                                )
+                                .child(
+                                    Button::new(
+                                        gpui::SharedString::from(format!("ai-ins-{msg_idx}-{block}")),
+                                        "Insert",
+                                    )
+                                    .size(Size::Xs)
+                                    .variant(Variant::Subtle)
+                                    .on_click(cx.listener(move |_this, _, _, cx| {
+                                        cx.emit(AssistantEvent::InsertSql(ins_code.clone()));
+                                    })),
+                                ),
+                        );
+                    }
+                    stack = stack.child(card);
+                }
+            }
+        }
+        stack.into_any_element()
+    }
 }
 
 fn dialect_label(kind: &str) -> &'static str {
@@ -180,28 +295,24 @@ impl Render for AssistantPanel {
             let mut stack = Stack::new().gap(Size::Sm);
             for (i, msg) in messages.iter().enumerate() {
                 let is_user = msg.role == Role::User;
-                let label = if is_user { "You" } else { "Assistant" };
-                let showing = if msg.text.is_empty() && streaming && i + 1 == messages.len() {
-                    "▍".to_string()
+                let label = if is_user {
+                    Text::new("You").size(Size::Xs).medium()
                 } else {
-                    msg.text.clone()
+                    Text::new("Assistant").size(Size::Xs).dimmed()
+                };
+                let awaiting = msg.text.is_empty() && streaming && i + 1 == messages.len();
+                let body = if awaiting {
+                    div().text_size(px(12.0)).child("▍").into_any_element()
+                } else {
+                    self.message_body(i, &msg.text, cx)
                 };
                 stack = stack.child(
                     div()
                         .p(px(8.0))
                         .rounded(px(6.0))
                         .bg(colors.bg_muted)
-                        .child(
-                            Text::new(label)
-                                .size(Size::Xs)
-                                .when(is_user, |t| t.medium())
-                                .when(!is_user, |t| t.dimmed()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .child(gpui::SharedString::from(showing)),
-                        ),
+                        .child(label)
+                        .child(body),
                 );
             }
             div()
@@ -241,5 +352,51 @@ impl Render for AssistantPanel {
             .child(header)
             .child(div().flex_1().min_h(px(0.0)).child(body))
             .child(composer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{segments, Segment};
+
+    fn one_code(text: &str) -> (bool, String) {
+        segments(text)
+            .into_iter()
+            .find_map(|s| match s {
+                Segment::Code { runnable, code } => Some((runnable, code)),
+                _ => None,
+            })
+            .expect("a code block")
+    }
+
+    #[test]
+    fn extracts_a_runnable_sql_block() {
+        let text = "Here you go:\n```sql\nSELECT * FROM users;\n```\nDone.";
+        let segs = segments(text);
+        assert_eq!(segs.len(), 3); // prose, code, prose
+        let (runnable, code) = one_code(text);
+        assert!(runnable);
+        assert_eq!(code, "SELECT * FROM users;");
+    }
+
+    #[test]
+    fn untagged_fence_is_runnable_but_other_languages_are_not() {
+        assert!(one_code("```\nSELECT 1;\n```").0);
+        assert!(!one_code("```python\nprint(1)\n```").0);
+    }
+
+    #[test]
+    fn unterminated_block_is_not_runnable() {
+        // Mid-stream: the closing fence has not arrived yet.
+        let (runnable, code) = one_code("```sql\nSELECT * FROM ");
+        assert!(!runnable);
+        assert_eq!(code, "SELECT * FROM");
+    }
+
+    #[test]
+    fn plain_text_has_no_code_segment() {
+        let segs = segments("just a sentence with no code");
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(segs[0], Segment::Text(_)));
     }
 }

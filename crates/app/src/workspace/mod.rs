@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::bridge;
 use crate::state::{AppState, Route, WorkspaceState, WorkspaceTab};
 use crate::theme;
-use assistant::AssistantPanel;
+use assistant::{AssistantEvent, AssistantPanel};
 use compare::{SchemaCompareEvent, SchemaCompareModal};
 use data::DataPanel;
 use dbswitcher::DbSwitcher;
@@ -84,6 +84,23 @@ impl Workspace {
             let (app, state) = (app.clone(), state.clone());
             cx.new(move |cx| AssistantPanel::new(app, state, cx))
         };
+        // The assistant asks the workspace to drop a SQL block into the Query
+        // tab (and optionally run it).
+        cx.subscribe(&assistant, |this, _panel, event: &AssistantEvent, cx| {
+            this.state.active_tab.set(cx, WorkspaceTab::Query);
+            match event {
+                AssistantEvent::RunSql(sql) => {
+                    let sql = sql.clone();
+                    this.query.update(cx, move |q, cx| q.run_sql(sql, cx));
+                }
+                AssistantEvent::InsertSql(sql) => {
+                    let sql = sql.clone();
+                    this.query.update(cx, move |q, cx| q.set_sql(&sql, cx));
+                }
+            }
+            cx.notify();
+        })
+        .detach();
 
         let palette = cx.new(Spotlight::new);
 

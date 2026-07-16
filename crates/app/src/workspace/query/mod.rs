@@ -80,6 +80,17 @@ impl QueryPanel {
         }
     }
 
+    /// Load SQL into the editor without running it (assistant "Insert").
+    pub fn set_sql(&self, sql: &str, cx: &mut gpui::App) {
+        self.editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+    }
+
+    /// Load SQL into the editor and run it immediately (assistant "Run").
+    pub fn run_sql(&self, sql: String, cx: &mut gpui::App) {
+        self.editor.update(cx, |editor, cx| editor.set_text(&sql, cx));
+        self.run(sql, cx);
+    }
+
     fn run(&self, sql: String, cx: &mut gpui::App) {
         if sql.trim().is_empty() {
             return;
