@@ -12,11 +12,29 @@ description = "Tables — an open-source database client built with gpui and gui
 name = "tablesdev"
 path = "src/main.rs"
 
+# Debian packaging (`cargo deb`, driven by scripts/linux.sh). The explicit
+# `assets` list disables cargo-deb's automatic binary inclusion and installs the
+# `tablesdev` build as `tables`. cargo-deb remaps the `target/release/` prefix to
+# the actual `--target` output path.
+[package.metadata.deb]
+name = "tables"
+maintainer = "Wess Cope <opensource@wess.io>"
+license-file = ["../../LICENSE", "0"]
+section = "database"
+priority = "optional"
+extended-description = "A fast, modern database client for Postgres, MySQL, and SQLite, built with gpui and guise."
+assets = [
+    ["target/release/tablesdev", "usr/bin/tables", "755"],
+    ["../../assets/tables.desktop", "usr/share/applications/tables.desktop", "644"],
+    ["../../assets/icon512.png", "usr/share/pixmaps/tables.png", "644"],
+]
+
 [dependencies]
 gpui = { workspace = true }
 guise-ui = { workspace = true }
 model = { workspace = true }
 host = { workspace = true }
+ai = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }

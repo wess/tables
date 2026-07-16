@@ -1,0 +1,13 @@
+[package]
+name = "ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The AI assistant client for Tables — streaming chat over the Anthropic Messages API."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }

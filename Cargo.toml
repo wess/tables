@@ -5,6 +5,7 @@ members = [
     "crates/store",
     "crates/db",
     "crates/host",
+    "crates/ai",
     "crates/app",
 ]
 
@@ -48,11 +49,20 @@ dirs = "6"
 regex = "1"
 rand = "0.9"
 
+# HTTP client for the AI assistant. Streams the Anthropic Messages API over the
+# shared tokio runtime; `stream` gives us `bytes_stream()` for SSE.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "native-tls",
+] }
+
 # Internal crates.
 model = { path = "crates/model" }
 store = { path = "crates/store" }
 db = { path = "crates/db" }
 host = { path = "crates/host" }
+ai = { path = "crates/ai" }
 
 [profile.dev]
 debug = "limited"

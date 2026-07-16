@@ -18,6 +18,11 @@ pub struct Settings {
     pub grid_alternate_rows: bool,
     pub date_format: String,
     pub null_display: String,
+    /// AI assistant model id (e.g. `claude-opus-4-8`). The secret itself lives
+    /// in the OS keychain, never here.
+    pub ai_model: String,
+    /// AI auth mode: `apiKey` (pay-per-use key) | `subscription` (Claude OAuth).
+    pub ai_auth_mode: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -36,6 +41,8 @@ impl Default for Settings {
             grid_alternate_rows: true,
             date_format: "ISO 8601".into(),
             null_display: "NULL".into(),
+            ai_model: "claude-opus-4-8".into(),
+            ai_auth_mode: "apiKey".into(),
             extra: Map::new(),
         }
     }

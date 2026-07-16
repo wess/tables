@@ -21,6 +21,9 @@ pub struct SettingsModal {
     tab_size: Entity<NumberInput>,
     null_display: Entity<TextInput>,
     date_format: Entity<TextInput>,
+    ai_model: Entity<Select>,
+    ai_auth: Entity<Select>,
+    ai_secret: Entity<TextInput>,
     word_wrap: bool,
     line_numbers: bool,
     show_row_numbers: bool,
@@ -76,6 +79,31 @@ impl SettingsModal {
             move |cx| TextInput::new(cx).label("Date format").value(&v)
         });
 
+        let model_idx = ai::MODELS
+            .iter()
+            .position(|(id, _)| *id == base.ai_model)
+            .unwrap_or(0);
+        let ai_model = cx.new(move |cx| {
+            let labels: Vec<String> = ai::MODELS.iter().map(|(_, label)| label.to_string()).collect();
+            Select::new(cx).label("Model").data(labels).selected(model_idx)
+        });
+        let auth_idx = if base.ai_auth_mode == "subscription" { 1 } else { 0 };
+        let ai_auth = cx.new(move |cx| {
+            Select::new(cx)
+                .label("Authentication")
+                .data(["API Key", "Claude Subscription"])
+                .selected(auth_idx)
+        });
+        let ai_stored = app.host.has_ai_secret(&base.ai_auth_mode);
+        let ai_secret = cx.new(move |cx| {
+            let placeholder = if ai_stored {
+                "•••••••• stored — paste to replace"
+            } else {
+                "sk-ant-… (API key) or OAuth token"
+            };
+            TextInput::new(cx).label("Secret").placeholder(placeholder).password(true)
+        });
+
         SettingsModal {
             word_wrap: base.editor_word_wrap,
             line_numbers: base.editor_line_numbers,
@@ -90,6 +118,9 @@ impl SettingsModal {
             tab_size,
             null_display,
             date_format,
+            ai_model,
+            ai_auth,
+            ai_secret,
         }
     }
 
@@ -107,6 +138,25 @@ impl SettingsModal {
         }
         .to_string();
 
+        let ai_model = ai::MODELS
+            .get(self.ai_model.read(cx).selected_index().unwrap_or(0))
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_else(|| ai::DEFAULT_MODEL.to_string());
+        let ai_auth_mode = match self.ai_auth.read(cx).selected_index().unwrap_or(0) {
+            1 => "subscription",
+            _ => "apiKey",
+        }
+        .to_string();
+
+        // A freshly entered secret goes to the keychain (keyed by auth mode);
+        // an empty field leaves any existing secret untouched.
+        let secret = self.ai_secret.read(cx).text();
+        if !secret.trim().is_empty() {
+            if let Err(error) = self.app.host.save_ai_secret(&ai_auth_mode, secret.trim()) {
+                self.app.toasts.error(cx, "Keychain unavailable", &error);
+            }
+        }
+
         let new = Settings {
             theme: theme.clone(),
             editor_font_size: self.font_size.read(cx).value_f64().unwrap_or(13.0) as f32,
@@ -119,6 +169,8 @@ impl SettingsModal {
             grid_alternate_rows: self.alternate_rows,
             date_format: self.date_format.read(cx).text(),
             null_display: self.null_display.read(cx).text(),
+            ai_model,
+            ai_auth_mode,
             extra: self.base.extra.clone(),
         };
 
@@ -183,6 +235,20 @@ impl Render for SettingsModal {
                 }),
             ));
 
+        let ai = Stack::new()
+            .gap(Size::Sm)
+            .child(Title::new("AI Assistant").order(6))
+            .child(Group::new().grow(true).gap(Size::Sm).child(self.ai_model.clone()).child(self.ai_auth.clone()))
+            .child(self.ai_secret.clone())
+            .child(
+                Text::new(
+                    "Anthropic (Claude). Use a pay-per-use API key, or paste a Claude \
+                     subscription OAuth token. Stored in your OS keychain, never on disk.",
+                )
+                .size(Size::Xs)
+                .dimmed(),
+            );
+
         let actions = Group::new()
             .justify(Justify::End)
             .gap(Size::Xs)
@@ -200,7 +266,7 @@ impl Render for SettingsModal {
             .title("Settings")
             .width(520.0)
             .on_close(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Close)))
-            .child(Stack::new().gap(Size::Lg).child(appearance).child(editor).child(grid))
+            .child(Stack::new().gap(Size::Lg).child(appearance).child(editor).child(grid).child(ai))
             .child(Divider::new())
             .child(actions)
     }

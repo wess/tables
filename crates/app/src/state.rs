@@ -104,6 +104,9 @@ pub struct WorkspaceState {
     pub macros_open: Signal<bool>,
     pub compare_open: Signal<bool>,
     pub diagram_open: Signal<bool>,
+
+    /// The slide-out AI assistant column.
+    pub ai_open: Signal<bool>,
 }
 
 impl WorkspaceState {
@@ -139,6 +142,7 @@ impl WorkspaceState {
             macros_open: Signal::new(cx, false),
             compare_open: Signal::new(cx, false),
             diagram_open: Signal::new(cx, false),
+            ai_open: Signal::new(cx, false),
         }
     }
 

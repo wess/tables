@@ -2,6 +2,7 @@
 //! Query / Structure), and a status bar. The panels share one `WorkspaceState`,
 //! passed in at construction so several connections never collide.
 
+mod assistant;
 mod charts;
 mod compare;
 mod data;
@@ -24,6 +25,7 @@ use serde_json::Value;
 use crate::bridge;
 use crate::state::{AppState, Route, WorkspaceState, WorkspaceTab};
 use crate::theme;
+use assistant::AssistantPanel;
 use compare::{SchemaCompareEvent, SchemaCompareModal};
 use data::DataPanel;
 use dbswitcher::DbSwitcher;
@@ -41,6 +43,7 @@ pub struct Workspace {
     data: Entity<DataPanel>,
     query: Entity<QueryPanel>,
     structure: Entity<StructurePanel>,
+    assistant: Entity<AssistantPanel>,
     settings_modal: Option<Entity<SettingsModal>>,
     compare_modal: Option<Entity<SchemaCompareModal>>,
     diagram_modal: Option<Entity<ErDiagramModal>>,
@@ -55,6 +58,7 @@ impl Workspace {
         watch(cx, &state.active_table);
         watch(cx, &state.connection);
         watch(cx, &state.rows);
+        watch(cx, &state.ai_open);
 
         let sidebar = {
             let state = state.clone();
@@ -76,6 +80,10 @@ impl Workspace {
             let (app, state) = (app.clone(), state.clone());
             cx.new(move |cx| StructurePanel::new(app, state, cx))
         };
+        let assistant = {
+            let (app, state) = (app.clone(), state.clone());
+            cx.new(move |cx| AssistantPanel::new(app, state, cx))
+        };
 
         let palette = cx.new(Spotlight::new);
 
@@ -87,6 +95,7 @@ impl Workspace {
             data,
             query,
             structure,
+            assistant,
             settings_modal: None,
             compare_modal: None,
             diagram_modal: None,
@@ -127,6 +136,10 @@ impl Workspace {
             let st_inspect = state.clone();
             s = s.item_hint("Toggle Inspector", "data", move |_w, cx| {
                 st_inspect.inspector_open.update(cx, |o| *o = !*o);
+            });
+            let st_ai = state.clone();
+            s = s.item_hint("Toggle AI Assistant", "workspace", move |_w, cx| {
+                st_ai.ai_open.update(cx, |o| *o = !*o);
             });
             s = s.item_hint("Back to Connections", "esc", move |_w, cx| {
                 route.set(cx, Route::Home);
@@ -225,6 +238,7 @@ impl Render for Workspace {
         let active_table = self.state.active_table.get(cx);
         let tab = self.state.active_tab.get(cx);
         let total = self.state.rows.read(cx).as_ref().map(|r| r.total);
+        let ai_open = self.state.ai_open.get(cx);
 
         // --- sidebar column ---
         let sidebar_header = div()
@@ -310,6 +324,14 @@ impl Render for Workspace {
                     .align(Align::Center)
                     .child(Text::new(active_table.clone().unwrap_or_default()).size(Size::Xs).dimmed())
                     .child(
+                        Button::new("ws-ai", "✦ AI")
+                            .size(Size::Xs)
+                            .variant(if ai_open { Variant::Light } else { Variant::Subtle })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.ai_open.update(cx, |o| *o = !*o);
+                            })),
+                    )
+                    .child(
                         Button::new("ws-compare", "⇄ Compare")
                             .size(Size::Xs)
                             .variant(Variant::Subtle)
@@ -361,6 +383,9 @@ impl Render for Workspace {
             }))
             .child(sidebar_col)
             .child(main_col);
+        if ai_open {
+            root = root.child(self.assistant.clone());
+        }
         if let Some(modal) = &self.settings_modal {
             root = root.child(modal.clone());
         }
