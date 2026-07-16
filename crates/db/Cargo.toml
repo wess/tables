@@ -1,0 +1,17 @@
+[package]
+name = "db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Async multi-engine database client for Tables (Postgres, MySQL, SQLite) over sqlx."
+
+[dependencies]
+model = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+bigdecimal = "0.4"
+async-trait = "0.1"
+uuid = { workspace = true }

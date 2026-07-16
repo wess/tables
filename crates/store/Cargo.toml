@@ -1,0 +1,16 @@
+[package]
+name = "store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local metadata persistence for Tables — plain JSON files under ~/.tables."
+
+[dependencies]
+model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+# Secret storage. `apple-native` uses the macOS Keychain; a backend error
+# degrades gracefully (the caller keeps the password in JSON).
+keyring = { version = "3", features = ["apple-native"] }

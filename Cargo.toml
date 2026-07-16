@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/model",
+    "crates/store",
+    "crates/db",
+    "crates/host",
+    "crates/app",
+]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Wess Cope <opensource@wess.io>"]
+
+[workspace.dependencies]
+# UI. Unlike Asylum (pinned to an old guise on a zed-rev gpui for libsinclair),
+# Tables has no terminal, so it uses the modern setup guise 0.10 targets:
+# plain crates.io gpui with no `[patch.crates-io]` and no vendored `block`.
+gpui = "0.2.2"
+# No webview: Tables has no embedded-browser surface, so drop the wry dep.
+guise-ui = { git = "https://github.com/wess/guise", default-features = false }
+
+# Async database engine. sqlx drives all three client engines (Postgres,
+# MySQL, SQLite) over one tokio runtime; the gpui app bridges to it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-native-tls",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "json",
+    "chrono",
+    "uuid",
+    "bigdecimal",
+] }
+
+# Shared support crates (pinned once).
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+regex = "1"
+rand = "0.9"
+
+# Internal crates.
+model = { path = "crates/model" }
+store = { path = "crates/store" }
+db = { path = "crates/db" }
+host = { path = "crates/host" }
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"

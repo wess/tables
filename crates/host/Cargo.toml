@@ -1,0 +1,18 @@
+[package]
+name = "host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The service facade tying the db engine and local store together for Tables."
+
+[dependencies]
+model = { workspace = true }
+db = { workspace = true }
+store = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }

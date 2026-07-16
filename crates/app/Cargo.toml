@@ -1,0 +1,23 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Tables — an open-source database client built with gpui and guise."
+
+# The dev binary is `tablesdev` so a dev build never collides with an installed
+# `tables`. Release packaging installs this same binary as `tables`.
+[[bin]]
+name = "tablesdev"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { workspace = true }
+guise-ui = { workspace = true }
+model = { workspace = true }
+host = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
