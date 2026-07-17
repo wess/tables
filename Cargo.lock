@@ -2517,8 +2517,8 @@ checksum = "12101ecc8225ea6d675bc70263074eab6169079621c2186fe0c66590b2df9681"
 
 [[package]]
 name = "guise-ui"
-version = "0.10.0"
-source = "git+https://github.com/wess/guise#16eadb061f448d12d4f88d78b69019d4b602df3f"
+version = "0.11.0"
+source = "git+https://github.com/wess/guise#4a8aeb7e2af176a68ef7b14cf62c2843a436a5e3"
 dependencies = [
  "gpui",
 ]
