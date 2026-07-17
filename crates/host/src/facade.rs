@@ -356,6 +356,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The structure-editing DDL and the whole-database backup round-trip
+    /// against a real SQLite database.
+    #[tokio::test]
+    async fn structure_editing_and_backup() {
+        let _guard = E2E_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("tables_ddl_{}", model::new_uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("TABLES_DIR", &dir);
+
+        connections::upsert(&sqlite_conn("ddl", &dir.join("ddl.db"))).unwrap();
+        let host = Host::new();
+        host.connect("ddl").await.unwrap();
+        host.list_tables("ddl").await.unwrap(); // make active
+
+        // Create a table, add a column, and index it.
+        let cols = vec![
+            model::NewColumn { name: "id".into(), data_type: "INTEGER".into(), nullable: false, primary_key: true, default_value: None },
+            model::NewColumn { name: "name".into(), data_type: "TEXT".into(), nullable: true, primary_key: false, default_value: None },
+        ];
+        host.create_table("people", &cols).await.unwrap();
+        host.add_column("people", "age", "INTEGER", true, Some("0")).await.unwrap();
+        host.create_index("people", "people_name", &["name".into()], false).await.unwrap();
+
+        let structure = host.table_structure("people").await.unwrap();
+        assert_eq!(structure.columns.len(), 3, "id, name, age");
+        assert!(structure.columns.iter().any(|c| c.name == "age"));
+        assert!(structure.indexes.iter().any(|i| i.name == "people_name"));
+
+        // Seed a row and back the database up.
+        host.execute_query("INSERT INTO people (name, age) VALUES ('Ada', 40)").await.unwrap();
+        let backup = dir.join("dump.sql");
+        let tables = host.backup_database(backup.to_str().unwrap()).await.unwrap();
+        assert!(tables >= 1);
+        let dump = std::fs::read_to_string(&backup).unwrap();
+        assert!(dump.contains("people"));
+        assert!(dump.contains("Ada"));
+
+        // Drop the index and a column, then the table.
+        host.drop_index("people", "people_name").await.unwrap();
+        host.drop_column("people", "age").await.unwrap();
+        host.drop_table("people").await.unwrap();
+        let tables = host.list_tables("ddl").await.unwrap();
+        assert!(!tables.iter().any(|t| t.name == "people"));
+
+        host.disconnect("ddl").await;
+        std::env::remove_var("TABLES_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A reviewed batch whose middle statement fails must leave the database
     /// unchanged (AUD-003).
     #[tokio::test]
