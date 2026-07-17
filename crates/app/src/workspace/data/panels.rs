@@ -77,6 +77,13 @@ impl DataPanel {
                     .disabled(!has_selection)
                     .on_click(cx.listener(|this, _, _, cx| this.copy_selection(cx))),
             )
+            .child(
+                Button::new("data-copy-insert", "Copy INSERT")
+                    .size(Size::Xs)
+                    .variant(Variant::Subtle)
+                    .disabled(!has_selection)
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_as_insert(cx))),
+            )
             .child(Divider::vertical())
             .child(
                 Button::new("data-import", "Import")

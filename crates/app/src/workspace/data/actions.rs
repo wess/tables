@@ -208,6 +208,30 @@ impl DataPanel {
             .success(cx, &format!("{} row(s) copied", selection.len()), 1500);
     }
 
+    /// Copy the selected rows to the clipboard as runnable `INSERT` statements.
+    pub(super) fn copy_as_insert(&self, cx: &mut gpui::App) {
+        let rows: Vec<model::Row> = {
+            let selection = self.state.selection.read(cx);
+            if selection.is_empty() {
+                return;
+            }
+            let Some(response) = self.state.rows.read(cx).as_ref() else {
+                return;
+            };
+            selection.iter().filter_map(|i| response.rows.get(*i).cloned()).collect()
+        };
+        let Some(table) = self.state.active_table.get(cx) else {
+            return;
+        };
+        match self.app.host.rows_to_insert(&table, &rows) {
+            Ok(sql) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
+                self.app.toasts.success(cx, &format!("{} row(s) copied as INSERT", rows.len()), 1500);
+            }
+            Err(e) => self.app.toasts.error(cx, "Copy failed", &e),
+        }
+    }
+
     /// Import a CSV/TSV file into the active table (native file picker).
     pub(super) fn import_csv(&self, cx: &mut gpui::App) {
         let Some(table) = self.state.active_table.get(cx) else {

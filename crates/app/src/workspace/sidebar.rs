@@ -1,28 +1,169 @@
-//! The table-list sidebar. Selecting a table runs `WorkspaceState::select_table`,
-//! which resets the data-tab state.
+//! The table-list sidebar. A filter box narrows the list; objects are grouped
+//! by kind (tables, then views). Selecting one runs
+//! `WorkspaceState::select_table`; right-clicking opens a "Generate SQL" menu.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, SharedString, Window};
+use gpui::{
+    div, px, ClipboardItem, Context, Entity, MouseButton, MouseDownEvent, Pixels, Point,
+    SharedString, Window,
+};
 use guise::prelude::*;
 
-use crate::state::WorkspaceState;
+use crate::bridge;
+use crate::state::{AppState, WorkspaceState};
+use model::TableInfo;
 
 pub struct Sidebar {
+    app: AppState,
     state: WorkspaceState,
+    search: Entity<TextInput>,
+    /// The per-table "Generate SQL" context menu, rebuilt on each right-click.
+    menu: Option<Entity<ContextMenu>>,
 }
 
 impl Sidebar {
-    pub fn new(state: WorkspaceState, cx: &mut Context<Self>) -> Self {
+    pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
         watch(cx, &state.tables);
         watch(cx, &state.tables_loading);
         watch(cx, &state.tables_error);
         watch(cx, &state.active_table);
-        Sidebar { state }
+
+        let search =
+            cx.new(|cx| TextInput::new(cx).placeholder("Filter tables…").size(Size::Xs));
+        // Re-render as the filter text changes.
+        cx.subscribe(&search, |_this, _input, event: &TextInputEvent, cx| {
+            if let TextInputEvent::Change(_) = event {
+                cx.notify();
+            }
+        })
+        .detach();
+
+        Sidebar { app, state, search, menu: None }
+    }
+
+    /// Build and show the "Generate SQL" menu for `table` at the cursor.
+    fn open_table_menu(
+        &mut self,
+        table: &str,
+        pos: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        let t = table.to_string();
+
+        // Copy `sql` to the clipboard and toast; shared by every item.
+        let copy = move |label: &'static str, sql: String, cx: &mut gpui::App| {
+            cx.write_to_clipboard(ClipboardItem::new_string(sql));
+            AppState::get(cx).toasts.success(cx, &format!("{label} copied"), 1200);
+        };
+
+        let menu = cx.new(|cx| {
+            let m = ContextMenu::new(cx).width(220.0).section(t.clone());
+            let m = m.item("Copy SELECT", {
+                let (host, t, copy) = (host.clone(), t.clone(), copy);
+                move |_w, cx| match host.generate_select(&t) {
+                    Ok(sql) => copy("SELECT", sql, cx),
+                    Err(e) => AppState::get(cx).toasts.error(cx, "Failed", &e),
+                }
+            });
+            let m = m.item("Copy INSERT", {
+                let (host, t, copy, toasts) =
+                    (host.clone(), t.clone(), copy, toasts.clone());
+                move |_w, cx| {
+                    let (host, t, copy, toasts) =
+                        (host.clone(), t.clone(), copy, toasts.clone());
+                    bridge::run(
+                        cx,
+                        async move { host.generate_insert_template(&t).await },
+                        move |result, cx| match result {
+                            Ok(sql) => copy("INSERT", sql, cx),
+                            Err(e) => toasts.error(cx, "Failed", &e),
+                        },
+                    );
+                }
+            });
+            let m = m.item("Copy CREATE", {
+                let (host, t, copy, toasts) =
+                    (host.clone(), t.clone(), copy, toasts.clone());
+                move |_w, cx| {
+                    let (host, t, copy, toasts) =
+                        (host.clone(), t.clone(), copy, toasts.clone());
+                    bridge::run(
+                        cx,
+                        async move { host.table_ddl(&t).await },
+                        move |result, cx| match result {
+                            Ok(sql) => copy("CREATE", sql, cx),
+                            Err(e) => toasts.error(cx, "Failed", &e),
+                        },
+                    );
+                }
+            });
+            m.divider().danger_item("Copy DROP", {
+                let (host, t, copy) = (host.clone(), t.clone(), copy);
+                move |_w, cx| match host.generate_drop(&t) {
+                    Ok(sql) => copy("DROP", sql, cx),
+                    Err(e) => AppState::get(cx).toasts.error(cx, "Failed", &e),
+                }
+            })
+        });
+        menu.update(cx, |m, cx| m.show(pos, window, cx));
+        self.menu = Some(menu);
+        cx.notify();
+    }
+
+    /// Render one object group ("Tables" / "Views") with a count header and a
+    /// `NavLink` per object. Returns `None` when the group is empty.
+    fn group(
+        &self,
+        label: &str,
+        objects: &[&TableInfo],
+        active: Option<&str>,
+        cx: &Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if objects.is_empty() {
+            return None;
+        }
+        let section = Stack::new().gap(Size::Xs).child(
+            div()
+                .px(px(6.0))
+                .child(Text::new(format!("{label} · {}", objects.len())).size(Size::Xs).dimmed()),
+        );
+        let mut list = Stack::new().gap(Size::Xs);
+        for table in objects {
+            let name = table.name.clone();
+            let is_active = active == Some(name.as_str());
+            let icon = if table.kind == "view" { "◇" } else { "▤" };
+            let for_click = name.clone();
+            let for_menu = name.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("tblrow-{name}")))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            this.open_table_menu(&for_menu, ev.position, window, cx);
+                        }),
+                    )
+                    .child(
+                        NavLink::new(SharedString::from(format!("tbl-{name}")), name.clone())
+                            .icon(icon)
+                            .active(is_active)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.select_table(cx, &for_click);
+                            })),
+                    ),
+            );
+        }
+        Some(section.child(list))
     }
 }
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = crate::theme::palette(cx);
+
         if *self.state.tables_loading.read(cx) {
             return div()
                 .p(px(12.0))
@@ -36,11 +177,8 @@ impl Render for Sidebar {
                 .into_any_element();
         }
 
-        let tables = self.state.tables.get(cx);
-        let active = self.state.active_table.get(cx);
-
-        if tables.is_empty() {
-            // A failed load is distinct from a genuinely empty schema.
+        // A failed load is distinct from a genuinely empty schema.
+        if self.state.tables.read(cx).is_empty() {
             if let Some(error) = self.state.tables_error.read(cx).clone() {
                 let red = guise::theme::theme(cx).color(ColorName::Red, 6);
                 return div()
@@ -59,28 +197,60 @@ impl Render for Sidebar {
                 .into_any_element();
         }
 
-        let mut list = Stack::new().gap(Size::Xs);
-        for table in &tables {
-            let name = table.name.clone();
-            let is_active = active.as_deref() == Some(name.as_str());
-            let icon = if table.kind == "view" { "◇" } else { "▤" };
-            let for_click = name.clone();
-            list = list.child(
-                NavLink::new(SharedString::from(format!("tbl-{name}")), name.clone())
-                    .icon(icon)
-                    .active(is_active)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.select_table(cx, &for_click);
-                    })),
-            );
-        }
+        let tables = self.state.tables.read(cx);
+        let active = self.state.active_table.read(cx).clone();
+        let query = self.search.read(cx).text().trim().to_lowercase();
 
-        div()
-            .id("sidebar-scroll")
+        // Filter, then split into base tables and views.
+        let matched: Vec<&TableInfo> = tables
+            .iter()
+            .filter(|t| query.is_empty() || t.name.to_lowercase().contains(&query))
+            .collect();
+        let base: Vec<&TableInfo> = matched.iter().copied().filter(|t| t.kind != "view").collect();
+        let views: Vec<&TableInfo> = matched.iter().copied().filter(|t| t.kind == "view").collect();
+
+        let body: gpui::AnyElement = if matched.is_empty() {
+            div()
+                .p(px(6.0))
+                .child(Text::new("No matches").size(Size::Xs).dimmed())
+                .into_any_element()
+        } else {
+            let mut list = Stack::new().gap(Size::Sm);
+            if let Some(g) = self.group("TABLES", &base, active.as_deref(), cx) {
+                list = list.child(g);
+            }
+            if let Some(g) = self.group("VIEWS", &views, active.as_deref(), cx) {
+                list = list.child(g);
+            }
+            list.into_any_element()
+        };
+
+        let mut root = div()
+            .flex()
+            .flex_col()
             .size_full()
-            .overflow_y_scroll()
-            .p(px(6.0))
-            .child(list)
-            .into_any_element()
+            .child(
+                // Sticky filter header above the scrolling list.
+                div()
+                    .flex_none()
+                    .px(px(6.0))
+                    .py(px(6.0))
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(self.search.clone()),
+            )
+            .child(
+                div()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .p(px(6.0))
+                    .child(body),
+            );
+        if let Some(menu) = &self.menu {
+            root = root.child(menu.clone());
+        }
+        root.into_any_element()
     }
 }

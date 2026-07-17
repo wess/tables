@@ -8,6 +8,7 @@ pub mod values;
 
 mod data;
 mod facade;
+mod generate;
 mod query;
 mod records;
 mod tables;

@@ -71,8 +71,8 @@ impl Workspace {
         }
 
         let sidebar = {
-            let state = state.clone();
-            cx.new(move |cx| Sidebar::new(state, cx))
+            let (app, state) = (app.clone(), state.clone());
+            cx.new(move |cx| Sidebar::new(app, state, cx))
         };
         let db_switcher = {
             let (app, state) = (app.clone(), state.clone());
