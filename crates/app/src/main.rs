@@ -73,40 +73,109 @@ pub struct Paste;
 #[action(namespace = tables, no_json)]
 pub struct SelectAll;
 
-/// The native menu bar. Custom items are UI-handled; only Quit / Hide act here.
+// Workspace actions dispatched from the menu bar (handled on the Workspace root
+// when a connection is open; no-ops on the home screen).
+macro_rules! ws_actions {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+            #[action(namespace = tables, no_json)]
+            pub struct $name;
+        )*
+    };
+}
+ws_actions!(
+    NewTable,
+    FormatSql,
+    ExplainQuery,
+    RunTransaction,
+    OpenSessions,
+    BackupDatabase,
+    RestoreDatabase,
+    RefreshTables,
+    SchemaCompare,
+    ErDiagram,
+    OpenExtensions,
+    ToggleAi,
+    ToggleFilters,
+    ToggleInspector,
+    OpenSettings,
+    ShowDocs,
+);
+
+fn menu(name: &'static str, items: Vec<MenuItem>) -> Menu {
+    Menu { name: SharedString::new_static(name), items }
+}
+
+/// The native menu bar, grouped like a full database client. Application-level
+/// items (Quit / Hide / Show Docs) act here; the rest dispatch actions the
+/// Workspace handles when a connection is open.
 fn menus() -> Vec<Menu> {
     vec![
-        Menu {
-            name: SharedString::new_static("Tables"),
-            items: vec![
+        menu(
+            "Tables",
+            vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
                 MenuItem::action("Hide Tables", Hide),
                 MenuItem::action("Hide Others", HideOthers),
                 MenuItem::action("Show All", ShowAll),
                 MenuItem::separator(),
                 MenuItem::action("Quit Tables", Quit),
             ],
-        },
-        Menu {
-            name: SharedString::new_static("File"),
-            items: vec![
+        ),
+        menu(
+            "File",
+            vec![
                 MenuItem::action("New Connection", NewConnection),
+                MenuItem::action("New Table…", NewTable),
                 MenuItem::separator(),
-                MenuItem::action("Quit", Quit),
+                MenuItem::action("Backup Database…", BackupDatabase),
+                MenuItem::action("Restore Database…", RestoreDatabase),
             ],
-        },
-        Menu {
-            name: SharedString::new_static("Edit"),
-            items: vec![
+        ),
+        menu(
+            "Edit",
+            vec![
                 MenuItem::os_action("Cut", Cut, OsAction::Cut),
                 MenuItem::os_action("Copy", Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", Paste, OsAction::Paste),
                 MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
             ],
-        },
-        Menu {
-            name: SharedString::new_static("Query"),
-            items: vec![MenuItem::action("Execute Query", RunQuery)],
-        },
+        ),
+        menu(
+            "Query",
+            vec![
+                MenuItem::action("Execute Query", RunQuery),
+                MenuItem::action("Run in Transaction", RunTransaction),
+                MenuItem::separator(),
+                MenuItem::action("Explain", ExplainQuery),
+                MenuItem::action("Format SQL", FormatSql),
+            ],
+        ),
+        menu(
+            "Database",
+            vec![
+                MenuItem::action("Refresh Tables", RefreshTables),
+                MenuItem::separator(),
+                MenuItem::action("Schema Compare…", SchemaCompare),
+                MenuItem::action("ER Diagram…", ErDiagram),
+                MenuItem::action("Sessions…", OpenSessions),
+                MenuItem::separator(),
+                MenuItem::action("Extensions…", OpenExtensions),
+            ],
+        ),
+        menu(
+            "View",
+            vec![
+                MenuItem::action("Command Palette…", OpenPalette),
+                MenuItem::separator(),
+                MenuItem::action("Toggle AI Assistant", ToggleAi),
+                MenuItem::action("Toggle Filters", ToggleFilters),
+                MenuItem::action("Toggle Inspector", ToggleInspector),
+            ],
+        ),
+        menu("Help", vec![MenuItem::action("Documentation", ShowDocs)]),
     ]
 }
 
@@ -120,12 +189,17 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-shift-r", RefreshTables, None),
+            KeyBinding::new("cmd-shift-f", FormatSql, None),
+            KeyBinding::new("cmd-e", ExplainQuery, None),
         ]);
         cx.set_menus(menus());
         cx.on_action::<Quit>(|_, cx| cx.quit());
         cx.on_action::<Hide>(|_, cx| cx.hide());
         cx.on_action::<HideOthers>(|_, cx| cx.hide_other_apps());
         cx.on_action::<ShowAll>(|_, cx| cx.unhide_other_apps());
+        cx.on_action::<ShowDocs>(|_, cx| cx.open_url("https://github.com/wess/tables"));
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(

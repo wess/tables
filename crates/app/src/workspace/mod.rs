@@ -545,6 +545,49 @@ impl Render for Workspace {
                 this.query.update(cx, |q, cx| q.run_current(cx));
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &crate::RunTransaction, _, cx| {
+                this.state.active_tab.set(cx, WorkspaceTab::Query);
+                this.query.update(cx, |q, cx| q.run_transaction(cx));
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &crate::ExplainQuery, _, cx| {
+                this.state.active_tab.set(cx, WorkspaceTab::Query);
+                this.query.update(cx, |q, cx| q.explain_current(cx));
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &crate::FormatSql, _, cx| {
+                this.state.active_tab.set(cx, WorkspaceTab::Query);
+                this.query.update(cx, |q, cx| q.format_current(cx));
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &crate::NewTable, _, cx| {
+                this.sidebar.update(cx, |s, cx| s.open_create_table(cx));
+            }))
+            .on_action(cx.listener(|this, _: &crate::RefreshTables, _, cx| {
+                this.state.bump_tables(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::OpenSessions, _, cx| this.open_sessions(cx)))
+            .on_action(cx.listener(|this, _: &crate::OpenExtensions, _, cx| {
+                this.open_extensions(cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::SchemaCompare, _, cx| this.open_compare(cx)))
+            .on_action(cx.listener(|this, _: &crate::ErDiagram, _, cx| this.open_diagram(cx)))
+            .on_action(cx.listener(|this, _: &crate::OpenSettings, _, cx| this.open_settings(cx)))
+            .on_action(cx.listener(|this, _: &crate::BackupDatabase, _, cx| {
+                this.backup_database(cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::RestoreDatabase, _, cx| {
+                this.restore_database(cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleAi, _, cx| {
+                this.state.ai_open.update(cx, |o| *o = !*o);
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleFilters, _, cx| {
+                this.state.filter_panel_open.update(cx, |o| *o = !*o);
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleInspector, _, cx| {
+                this.state.inspector_open.update(cx, |o| *o = !*o);
+            }))
             .child(sidebar_col)
             .child(main_col);
         if ai_open {
