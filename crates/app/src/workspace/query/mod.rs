@@ -8,6 +8,7 @@
 
 mod actions;
 mod complete;
+mod format;
 mod panels;
 
 use gpui::prelude::*;
@@ -167,6 +168,40 @@ impl QueryPanel {
         self.run(sql, cx);
     }
 
+    /// Reformat the editor's SQL in place.
+    pub fn format_current(&self, cx: &mut gpui::App) {
+        let sql = self.editor.read(cx).text();
+        if sql.trim().is_empty() {
+            return;
+        }
+        let formatted = format::format_sql(&sql);
+        self.editor.update(cx, |ed, cx| ed.set_text(&formatted, cx));
+    }
+
+    /// Run the planner for the editor's SQL and show the plan in the results.
+    pub fn explain_current(&self, cx: &mut gpui::App) {
+        let sql = self.editor.read(cx).text();
+        if sql.trim().is_empty() {
+            return;
+        }
+        self.running.set(cx, true);
+        let host = self.app.host.clone();
+        let results = self.results.clone();
+        let running = self.running.clone();
+        let toasts = self.app.toasts.clone();
+        bridge::run(
+            cx,
+            async move { host.explain(&sql).await },
+            move |outcome, cx| {
+                running.set(cx, false);
+                match outcome {
+                    Ok(result) => results.set(cx, vec![result]),
+                    Err(error) => toasts.error(cx, "Explain failed", &error),
+                }
+            },
+        );
+    }
+
     fn run(&self, sql: String, cx: &mut gpui::App) {
         if sql.trim().is_empty() {
             return;
@@ -295,7 +330,21 @@ impl Render for QueryPanel {
                                 this.run(sql, cx);
                             })),
                     )
-                    .child(Text::new("⌘⏎").size(Size::Xs).dimmed()),
+                    .child(Text::new("⌘⏎").size(Size::Xs).dimmed())
+                    .child(
+                        Button::new("query-explain", "Explain")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .disabled(running || self.editor.read(cx).text().trim().is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.explain_current(cx))),
+                    )
+                    .child(
+                        Button::new("query-format", "Format")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .disabled(self.editor.read(cx).text().trim().is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.format_current(cx))),
+                    ),
             )
             .child(
                 Group::new()

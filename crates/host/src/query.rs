@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use db::filters::split_statements;
+use db::Dialect;
 use model::{iso_now, new_uuid, Favorite, HistoryEntry, QueryResult, SavedTab};
 use store::{favorites, history, tabs};
 
@@ -73,6 +74,20 @@ impl Host {
         // Any statement in the batch may have been DDL — drop cached column types.
         self.invalidate_schema_cache();
         Ok(results)
+    }
+
+    /// Run the query planner for `sql` and return the plan as a result set.
+    /// SQLite uses `EXPLAIN QUERY PLAN`; Postgres/MySQL use plain `EXPLAIN`
+    /// (never `ANALYZE`, which would execute the statement).
+    pub async fn explain(&self, sql: &str) -> Result<QueryResult, String> {
+        let adapter = self.active_adapter()?;
+        let prefix = match adapter.dialect() {
+            Dialect::Sqlite => "EXPLAIN QUERY PLAN ",
+            _ => "EXPLAIN ",
+        };
+        let start = Instant::now();
+        let raw = adapter.query(&format!("{prefix}{}", sql.trim().trim_end_matches(';'))).await?;
+        Ok(QueryResult::from_raw(raw, elapsed_ms(start)))
     }
 
     fn record_history(
