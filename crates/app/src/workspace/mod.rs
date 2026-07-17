@@ -8,6 +8,7 @@ mod compare;
 mod data;
 mod dbswitcher;
 mod erdiagram;
+mod extensions;
 mod filter;
 mod grid;
 mod insert;
@@ -32,6 +33,7 @@ use compare::{SchemaCompareEvent, SchemaCompareModal};
 use data::DataPanel;
 use dbswitcher::DbSwitcher;
 use erdiagram::{ErDiagramEvent, ErDiagramModal};
+use extensions::{ExtensionsEvent, ExtensionsModal};
 use query::QueryPanel;
 use sessions::{SessionsEvent, SessionsModal};
 use settings::{SettingsEvent, SettingsModal};
@@ -51,6 +53,7 @@ pub struct Workspace {
     compare_modal: Option<Entity<SchemaCompareModal>>,
     diagram_modal: Option<Entity<ErDiagramModal>>,
     sessions_modal: Option<Entity<SessionsModal>>,
+    extensions_modal: Option<Entity<ExtensionsModal>>,
     palette: Entity<Spotlight>,
 }
 
@@ -131,6 +134,7 @@ impl Workspace {
             compare_modal: None,
             diagram_modal: None,
             sessions_modal: None,
+            extensions_modal: None,
             palette,
         };
         workspace.load(cx);
@@ -198,6 +202,18 @@ impl Workspace {
         .detach();
     }
 
+    fn open_extensions(&mut self, cx: &mut Context<Self>) {
+        let app = self.app.clone();
+        let modal = cx.new(|cx| ExtensionsModal::new(app, cx));
+        cx.subscribe(&modal, |this, _modal, _event: &ExtensionsEvent, cx| {
+            this.extensions_modal = None;
+            cx.notify();
+        })
+        .detach();
+        self.extensions_modal = Some(modal);
+        cx.notify();
+    }
+
     fn open_sessions(&mut self, cx: &mut Context<Self>) {
         let app = self.app.clone();
         let modal = cx.new(|cx| SessionsModal::new(app, cx));
@@ -227,6 +243,7 @@ impl Workspace {
         let tables = self.state.tables.get(cx);
         let state = self.state.clone();
         let route = self.app.route.clone();
+        let this = cx.entity();
         let palette = cx.new(move |cx| {
             let mut s = Spotlight::new(cx);
             for table in &tables {
@@ -234,6 +251,10 @@ impl Workspace {
                 let target = table.name.clone();
                 s = s.item(table.name.clone(), move |_w, cx| st.select_table(cx, &target));
             }
+            let ext = this.clone();
+            s = s.item_hint("Extensions", "plugins", move |_w, cx| {
+                ext.update(cx, |w, cx| w.open_extensions(cx));
+            });
             let st_filter = state.clone();
             s = s.item_hint("Toggle Filters", "data", move |_w, cx| {
                 st_filter.filter_panel_open.update(cx, |o| *o = !*o);
@@ -539,6 +560,9 @@ impl Render for Workspace {
             root = root.child(modal.clone());
         }
         if let Some(modal) = &self.sessions_modal {
+            root = root.child(modal.clone());
+        }
+        if let Some(modal) = &self.extensions_modal {
             root = root.child(modal.clone());
         }
         root.child(self.palette.clone())
