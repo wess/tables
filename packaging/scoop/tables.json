@@ -1,14 +1,14 @@
 {
-    "version": "0.0.0",
+    "version": "0.1.0",
     "description": "A fast, modern database client for Postgres, MySQL, and SQLite.",
     "homepage": "https://github.com/wess/tables",
     "license": "MIT",
     "notes": "Windows builds are beta and currently unsigned.",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/wess/tables/releases/download/v0.0.0/tables-0.0.0-windows-x86_64.zip",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000",
-            "extract_dir": "tables-0.0.0-windows-x86_64"
+            "url": "https://github.com/wess/tables/releases/download/v0.1.0/tables-0.1.0-windows-x86_64.zip",
+            "hash": "26181f559f1e9aedbbfd767b6aa33ca14bd84bf2a52a020f2b5a7b61514e53d8",
+            "extract_dir": "tables-0.1.0-windows-x86_64"
         }
     },
     "bin": "tables.exe",
