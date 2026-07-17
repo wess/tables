@@ -12,6 +12,7 @@ mod facade;
 mod generate;
 mod query;
 mod records;
+mod sessions;
 mod tables;
 
 pub use facade::Host;

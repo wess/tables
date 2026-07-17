@@ -13,6 +13,7 @@ mod grid;
 mod insert;
 mod query;
 mod review;
+mod sessions;
 mod settings;
 mod sidebar;
 mod structedit;
@@ -32,6 +33,7 @@ use data::DataPanel;
 use dbswitcher::DbSwitcher;
 use erdiagram::{ErDiagramEvent, ErDiagramModal};
 use query::QueryPanel;
+use sessions::{SessionsEvent, SessionsModal};
 use settings::{SettingsEvent, SettingsModal};
 use sidebar::Sidebar;
 use structure::StructurePanel;
@@ -48,6 +50,7 @@ pub struct Workspace {
     settings_modal: Option<Entity<SettingsModal>>,
     compare_modal: Option<Entity<SchemaCompareModal>>,
     diagram_modal: Option<Entity<ErDiagramModal>>,
+    sessions_modal: Option<Entity<SessionsModal>>,
     palette: Entity<Spotlight>,
 }
 
@@ -127,10 +130,23 @@ impl Workspace {
             settings_modal: None,
             compare_modal: None,
             diagram_modal: None,
+            sessions_modal: None,
             palette,
         };
         workspace.load(cx);
         workspace
+    }
+
+    fn open_sessions(&mut self, cx: &mut Context<Self>) {
+        let app = self.app.clone();
+        let modal = cx.new(|cx| SessionsModal::new(app, cx));
+        cx.subscribe(&modal, |this, _modal, _event: &SessionsEvent, cx| {
+            this.sessions_modal = None;
+            cx.notify();
+        })
+        .detach();
+        self.sessions_modal = Some(modal);
+        cx.notify();
     }
 
     fn open_diagram(&mut self, cx: &mut Context<Self>) {
@@ -384,6 +400,12 @@ impl Render for Workspace {
                             .size(Size::Xs)
                             .variant(Variant::Subtle)
                             .on_click(cx.listener(|this, _, _, cx| this.open_diagram(cx))),
+                    )
+                    .child(
+                        Button::new("ws-sessions", "⚡ Sessions")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_sessions(cx))),
                     ),
             );
 
@@ -441,6 +463,9 @@ impl Render for Workspace {
             root = root.child(modal.clone());
         }
         if let Some(modal) = &self.diagram_modal {
+            root = root.child(modal.clone());
+        }
+        if let Some(modal) = &self.sessions_modal {
             root = root.child(modal.clone());
         }
         root.child(self.palette.clone())
