@@ -119,6 +119,65 @@ impl Host {
         Ok(ExportFileResult { path: Some(path.to_string()), rows: result.rows.len() as u64 })
     }
 
+    /// Serialize an already-fetched result set (columns + rows) to `format`
+    /// (`csv` / `json` / `sql` / `markdown` / `tsv`). Sync — the data is in
+    /// memory — so it drives both clipboard copy and file export. `table` names
+    /// the target for SQL `INSERT`s.
+    pub fn serialize_result(
+        &self,
+        columns: &[String],
+        rows: &[Row],
+        format: &str,
+        table: Option<&str>,
+    ) -> Result<String, String> {
+        let dialect = self.active_adapter().map(|a| a.dialect()).unwrap_or(Dialect::Sqlite);
+        match format {
+            "csv" | "tsv" => {
+                let delim = if format == "tsv" { "\t" } else { "," };
+                let mut lines = vec![columns
+                    .iter()
+                    .map(|c| csv_field(c, delim))
+                    .collect::<Vec<_>>()
+                    .join(delim)];
+                for row in rows {
+                    let cells: Vec<String> = columns
+                        .iter()
+                        .map(|col| match row.get(col) {
+                            None | Some(Value::Null) => String::new(),
+                            Some(v) => csv_field(&stringify_cell(v), delim),
+                        })
+                        .collect();
+                    lines.push(cells.join(delim));
+                }
+                Ok(lines.join("\n"))
+            }
+            "json" => serde_json::to_string_pretty(rows).map_err(|e| e.to_string()),
+            "sql" => Ok(insert_statements(
+                dialect,
+                table.filter(|t| !t.is_empty()).unwrap_or("query_result"),
+                columns,
+                rows,
+                true,
+            )),
+            "markdown" => Ok(markdown_table(columns, rows)),
+            other => Err(format!("Unknown format: {other}")),
+        }
+    }
+
+    /// Serialize a result set and write it to `path`; returns the row count.
+    pub fn write_result(
+        &self,
+        columns: &[String],
+        rows: &[Row],
+        format: &str,
+        path: &str,
+        table: Option<&str>,
+    ) -> Result<u64, String> {
+        let content = self.serialize_result(columns, rows, format, table)?;
+        std::fs::write(path, content).map_err(|e| e.to_string())?;
+        Ok(rows.len() as u64)
+    }
+
     /// Run one statement from inline text or a file path.
     pub async fn import_sql(
         &self,
@@ -243,6 +302,27 @@ fn stringify_cell(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         other => other.to_string(),
     }
+}
+
+/// A GitHub-flavored Markdown table for copy-to-clipboard. Pipes and newlines
+/// in cells are escaped so the table stays on its grid.
+fn markdown_table(columns: &[String], rows: &[Row]) -> String {
+    let esc = |s: &str| s.replace('|', "\\|").replace('\n', " ");
+    let mut out = vec![
+        format!("| {} |", columns.iter().map(|c| esc(c)).collect::<Vec<_>>().join(" | ")),
+        format!("| {} |", columns.iter().map(|_| "---").collect::<Vec<_>>().join(" | ")),
+    ];
+    for row in rows {
+        let cells: Vec<String> = columns
+            .iter()
+            .map(|col| match row.get(col) {
+                None | Some(Value::Null) => String::new(),
+                Some(v) => esc(&stringify_cell(v)),
+            })
+            .collect();
+        out.push(format!("| {} |", cells.join(" | ")));
+    }
+    out.join("\n")
 }
 
 /// Quote a CSV field only when it contains the delimiter, a quote, or a newline.

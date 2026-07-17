@@ -5,6 +5,22 @@
 use super::{QueryPanel, Side};
 use crate::bridge;
 use crate::state::AppState;
+use model::Row;
+
+/// The export format implied by a save-path extension (default CSV).
+fn format_for_path(path: &str) -> &'static str {
+    if path.ends_with(".json") {
+        "json"
+    } else if path.ends_with(".sql") {
+        "sql"
+    } else if path.ends_with(".md") || path.ends_with(".markdown") {
+        "markdown"
+    } else if path.ends_with(".tsv") {
+        "tsv"
+    } else {
+        "csv"
+    }
+}
 
 impl QueryPanel {
     pub(super) fn toggle_side(&self, side: Side, cx: &mut gpui::App) {
@@ -80,6 +96,58 @@ impl QueryPanel {
                 Err(error) => toasts.error(cx, "Save failed", &error),
             },
         );
+    }
+
+    /// The first result set with data — the target of export/copy actions.
+    fn first_result(&self, cx: &gpui::App) -> Option<(Vec<String>, Vec<Row>)> {
+        self.results
+            .read(cx)
+            .iter()
+            .find(|r| !r.columns.is_empty() && !r.rows.is_empty())
+            .map(|r| (r.columns.clone(), r.rows.clone()))
+    }
+
+    /// Export the current result set to a file (format inferred from extension).
+    pub(super) fn export_results(&self, cx: &mut gpui::App) {
+        let Some((columns, rows)) = self.first_result(cx) else {
+            return;
+        };
+        let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let rx = cx.prompt_for_new_path(&dir, Some("query.csv"));
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        cx.spawn(async move |cx| {
+            let Ok(Ok(Some(path))) = rx.await else {
+                return;
+            };
+            let path = path.to_string_lossy().into_owned();
+            let format = format_for_path(&path);
+            let _ = cx.update(|cx| {
+                bridge::run(
+                    cx,
+                    async move { host.write_result(&columns, &rows, format, &path, None) },
+                    move |result, cx| match result {
+                        Ok(n) => toasts.success(cx, &format!("Exported {n} row(s)"), 2000),
+                        Err(e) => toasts.error(cx, "Export failed", &e),
+                    },
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Copy the current result set to the clipboard as a Markdown table.
+    pub(super) fn copy_results_markdown(&self, cx: &mut gpui::App) {
+        let Some((columns, rows)) = self.first_result(cx) else {
+            return;
+        };
+        match self.app.host.serialize_result(&columns, &rows, "markdown", None) {
+            Ok(md) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(md));
+                self.app.toasts.success(cx, "Copied as Markdown", 1500);
+            }
+            Err(e) => self.app.toasts.error(cx, "Copy failed", &e),
+        }
     }
 
     pub(super) fn delete_favorite(&self, id: String, cx: &mut gpui::App) {

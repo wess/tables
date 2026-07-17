@@ -212,6 +212,20 @@ impl Render for QueryPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.open_chart(cx))),
                     )
                     .child(
+                        Button::new("query-export", "Export")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .disabled(!has_chartable)
+                            .on_click(cx.listener(|this, _, _, cx| this.export_results(cx))),
+                    )
+                    .child(
+                        Button::new("query-copy-md", "Copy MD")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .disabled(!has_chartable)
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_results_markdown(cx))),
+                    )
+                    .child(
                         Button::new("query-history", "History")
                             .size(Size::Xs)
                             .variant(if side == Some(Side::History) { Variant::Light } else { Variant::Subtle })
