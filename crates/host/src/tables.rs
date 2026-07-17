@@ -177,6 +177,24 @@ impl Host {
         })
     }
 
+    /// Distinct table and column identifiers for the editor's autocomplete,
+    /// sorted and deduplicated. Bounded to a sane number of tables so a huge
+    /// schema doesn't stall the background load.
+    pub async fn schema_identifiers(&self) -> Result<Vec<String>, String> {
+        let adapter = self.active_adapter()?;
+        let tables = adapter.get_tables().await?;
+        let mut set = std::collections::BTreeSet::new();
+        for table in tables.iter().take(100) {
+            set.insert(table.name.clone());
+            if let Ok(cols) = adapter.get_columns(&table.name).await {
+                for col in cols {
+                    set.insert(col.name);
+                }
+            }
+        }
+        Ok(set.into_iter().collect())
+    }
+
     pub async fn table_structure(&self, table: &str) -> Result<TableStructure, String> {
         let adapter = self.active_adapter()?;
         Ok(TableStructure {

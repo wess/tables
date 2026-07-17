@@ -7,10 +7,11 @@
 //! helpers in `panels`.
 
 mod actions;
+mod complete;
 mod panels;
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, Window};
+use gpui::{anchored, deferred, div, point, px, Context, Entity, SharedString, Window};
 use guise::prelude::*;
 
 use crate::bridge;
@@ -49,6 +50,10 @@ pub struct QueryPanel {
     history: Signal<Vec<HistoryEntry>>,
     favorites: Signal<Vec<Favorite>>,
     chart_modal: Option<Entity<ChartModal>>,
+    /// Table/column identifiers for autocomplete, loaded once in the background.
+    schema: Signal<Vec<String>>,
+    /// The current completion suggestions (empty = popup hidden).
+    completions: Vec<String>,
 }
 
 impl QueryPanel {
@@ -65,17 +70,31 @@ impl QueryPanel {
         let side = Signal::new(cx, None);
         let history = Signal::new(cx, Vec::new());
         let favorites = Signal::new(cx, Vec::new());
+        let schema = Signal::new(cx, Vec::new());
         watch(cx, &results);
         watch(cx, &running);
         watch(cx, &side);
         watch(cx, &history);
         watch(cx, &favorites);
 
-        cx.subscribe(&editor, |this, editor, event: &EditorEvent, cx| {
-            if let EditorEvent::Run(_) = event {
+        // Load autocomplete identifiers once in the background.
+        {
+            let host = app.host.clone();
+            let out = schema.clone();
+            bridge::run(
+                cx,
+                async move { host.schema_identifiers().await.unwrap_or_default() },
+                move |ids, cx| out.set(cx, ids),
+            );
+        }
+
+        cx.subscribe(&editor, |this, editor, event: &EditorEvent, cx| match event {
+            EditorEvent::Run(_) => {
                 let sql = editor.read(cx).text();
+                this.completions.clear();
                 this.run(sql, cx);
             }
+            EditorEvent::Change(_) => this.update_completions(cx),
         })
         .detach();
 
@@ -90,7 +109,45 @@ impl QueryPanel {
             history,
             favorites,
             chart_modal: None,
+            schema,
+            completions: Vec::new(),
         }
+    }
+
+    /// Recompute the completion list from the identifier under the cursor.
+    fn update_completions(&mut self, cx: &mut Context<Self>) {
+        let word = {
+            let model = self.editor.read(cx).model();
+            let cursor = model.cursor();
+            model.line(cursor.line).and_then(|line| {
+                let chars: Vec<char> = line.chars().collect();
+                let col = cursor.col.min(chars.len());
+                let mut start = col;
+                while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+                    start -= 1;
+                }
+                (start < col).then(|| chars[start..col].iter().collect::<String>())
+            })
+        };
+        self.completions = match word {
+            Some(w) => complete::suggestions(&w, self.schema.read(cx)),
+            None => Vec::new(),
+        };
+        cx.notify();
+    }
+
+    /// Replace the word under the cursor with `word`.
+    fn accept_completion(&mut self, word: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let word = word.to_string();
+        self.editor.update(cx, |ed, cx| {
+            ed.edit(window, cx, |model| {
+                model.select_word();
+                model.delete_selection();
+                model.insert(&word);
+            });
+        });
+        self.completions.clear();
+        cx.notify();
     }
 
     /// Load SQL into the editor without running it (assistant "Insert").
@@ -144,6 +201,45 @@ impl QueryPanel {
         );
     }
 
+    /// The autocomplete list, floated at the caret via a deferred anchor.
+    fn completion_popup(
+        &self,
+        caret: gpui::Point<gpui::Pixels>,
+        line_h: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = crate::theme::palette(cx);
+        let muted = colors.bg_muted;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .min_w(px(160.0))
+            .py(px(4.0))
+            .bg(colors.bg_surface)
+            .border_1()
+            .border_color(colors.border)
+            .rounded(px(6.0))
+            .shadow_lg();
+        for (i, s) in self.completions.iter().enumerate() {
+            let word = s.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("cmpl-{i}")))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .text_size(px(12.0))
+                    .font_family(crate::theme::MONO_FAMILY)
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(muted))
+                    .child(SharedString::from(s.clone()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.accept_completion(&word, window, cx)
+                    })),
+            );
+        }
+        deferred(anchored().position(point(caret.x, caret.y + px(line_h))).child(list))
+    }
+
     fn open_chart(&mut self, cx: &mut Context<Self>) {
         // Borrow to pick the chartable result, cloning only its columns/rows.
         let picked = {
@@ -168,7 +264,7 @@ impl QueryPanel {
 }
 
 impl Render for QueryPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         let running = *self.running.read(cx);
         let side = *self.side.read(cx);
@@ -282,6 +378,11 @@ impl Render for QueryPanel {
         }
         if let Some(modal) = &self.chart_modal {
             root = root.child(modal.clone());
+        }
+        if !self.completions.is_empty() {
+            let caret = self.editor.read(cx).caret_origin(window);
+            let line_h = self.editor.read(cx).line_height();
+            root = root.child(self.completion_popup(caret, line_h, cx));
         }
         root
     }
