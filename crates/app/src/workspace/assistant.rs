@@ -73,6 +73,8 @@ pub struct AssistantPanel {
     input: Entity<TextInput>,
     messages: Signal<Vec<ChatMsg>>,
     streaming: Signal<bool>,
+    /// Keeps the transcript pinned to the newest tokens while streaming.
+    scroll: gpui::ScrollHandle,
 }
 
 impl EventEmitter<AssistantEvent> for AssistantPanel {}
@@ -94,7 +96,7 @@ impl AssistantPanel {
         })
         .detach();
 
-        AssistantPanel { app, state, input, messages, streaming }
+        AssistantPanel { app, state, input, messages, streaming, scroll: gpui::ScrollHandle::new() }
     }
 
     fn send_from_input(&self, cx: &mut gpui::App) {
@@ -140,15 +142,20 @@ impl AssistantPanel {
 
         let messages = self.messages.clone();
         let streaming = self.streaming.clone();
+        let scroll = self.scroll.clone();
         bridge::stream(
             cx,
             move |tx| ai::stream_chat(config, credential, Some(system), history, tx),
             move |event, cx| match event {
-                StreamEvent::Delta(text) => messages.update(cx, |list| {
-                    if let Some(last) = list.last_mut() {
-                        last.text.push_str(&text);
-                    }
-                }),
+                StreamEvent::Delta(text) => {
+                    messages.update(cx, |list| {
+                        if let Some(last) = list.last_mut() {
+                            last.text.push_str(&text);
+                        }
+                    });
+                    // Keep the freshest tokens in view as they arrive.
+                    scroll.scroll_to_bottom();
+                }
                 StreamEvent::Error(error) => messages.update(cx, |list| {
                     if let Some(last) = list.last_mut() {
                         last.text = format!("⚠ {error}");
@@ -262,8 +269,8 @@ impl Render for AssistantPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         let streaming = *self.streaming.read(cx);
-        let messages = self.messages.get(cx);
-        let has_key = self.app.host.has_ai_secret(&self.app.settings.get(cx).ai_auth_mode);
+        let messages = self.messages.read(cx);
+        let has_key = self.app.host.has_ai_secret(&self.app.settings.read(cx).ai_auth_mode);
 
         let header = div()
             .flex()
@@ -332,6 +339,7 @@ impl Render for AssistantPanel {
                 .id("ai-messages")
                 .size_full()
                 .overflow_y_scroll()
+                .track_scroll(&self.scroll)
                 .p(px(8.0))
                 .child(stack)
                 .into_any_element()

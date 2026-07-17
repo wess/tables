@@ -85,13 +85,20 @@ impl QueryPanel {
     pub(super) fn delete_favorite(&self, id: String, cx: &mut gpui::App) {
         let host = self.app.host.clone();
         let favorites = self.favorites.clone();
+        let toasts = self.app.toasts.clone();
         bridge::run(
             cx,
             async move {
-                let _ = host.delete_favorite(&id);
-                host.list_favorites().unwrap_or_default()
+                let result = host.delete_favorite(&id);
+                (result, host.list_favorites().unwrap_or_default())
             },
-            move |list, cx| favorites.set(cx, list),
+            move |(result, list), cx| {
+                favorites.set(cx, list);
+                match result {
+                    Ok(_) => toasts.success(cx, "Favorite deleted", 1500),
+                    Err(error) => toasts.error(cx, "Delete failed", &error),
+                }
+            },
         );
     }
 }

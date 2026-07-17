@@ -37,7 +37,7 @@ impl DataPanel {
         let columns = response.columns.clone();
         let table = self.state.active_table.get(cx).unwrap_or_default();
         let modal = cx.new(|cx| InsertModal::new(table, columns, cx));
-        cx.subscribe(&modal, |this, _modal, event: &InsertEvent, cx| match event {
+        cx.subscribe(&modal, |this, modal, event: &InsertEvent, cx| match event {
             InsertEvent::Cancel => {
                 this.insert = None;
                 cx.notify();
@@ -48,6 +48,10 @@ impl DataPanel {
                 let host = this.app.host.clone();
                 let toasts = this.app.toasts.clone();
                 let state = this.state.clone();
+                // Keep the modal open and drive it from the result, so a failure
+                // preserves the typed values and a success clears it for the next
+                // row instead of dismissing on every submit.
+                let modal = modal.clone();
                 bridge::run(
                     cx,
                     async move { host.row_insert(&table, &row).await },
@@ -55,12 +59,13 @@ impl DataPanel {
                         Ok(_) => {
                             state.bump_rows(cx);
                             toasts.success(cx, "Row inserted", 1500);
+                            modal.update(cx, |m, cx| m.succeed(cx));
                         }
-                        Err(error) => toasts.error(cx, "Insert failed", &error),
+                        Err(error) => {
+                            modal.update(cx, |m, cx| m.fail(error, cx));
+                        }
                     },
                 );
-                this.insert = None;
-                cx.notify();
             }
         })
         .detach();
@@ -141,14 +146,27 @@ impl DataPanel {
             .collect();
         bridge::run(
             cx,
-            async move { host.apply_row_writes(&writes).await.map(|_| ()) },
+            async move { host.apply_row_writes(&writes).await },
             move |result, cx| {
                 committing.set(cx, false);
                 match result {
-                    Ok(_) => {
+                    Ok(affected) => {
                         pending.set(cx, Vec::new());
                         state.bump_rows(cx);
-                        toasts.success(cx, &format!("{count} change(s) committed"), 2000);
+                        if affected == 0 {
+                            // The batch ran but matched no rows: don't claim success.
+                            toasts.warn(
+                                cx,
+                                "No rows changed",
+                                "The commit matched no rows — the data may have changed since it loaded.",
+                            );
+                        } else {
+                            toasts.success(
+                                cx,
+                                &format!("{affected} row(s) changed · {count} change(s) committed"),
+                                2000,
+                            );
+                        }
                     }
                     Err(error) => toasts.error(cx, "Commit failed", &error),
                 }

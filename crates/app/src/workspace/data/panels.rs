@@ -130,7 +130,10 @@ impl DataPanel {
                         .size(Size::Xs)
                         .variant(Variant::Subtle)
                         .color(ColorName::Red)
-                        .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.confirm_discard = true;
+                            cx.notify();
+                        })),
                 );
         }
 
@@ -146,7 +149,7 @@ impl DataPanel {
 
     pub(super) fn review_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
-        let changes = self.state.pending.get(cx);
+        let changes = self.state.pending.read(cx);
         let committing = *self.committing.read(cx);
         let count = changes.len();
         let updates = changes.iter().filter(|c| matches!(c, PendingChange::Update { .. })).count();
@@ -154,7 +157,7 @@ impl DataPanel {
         let deletes = changes.iter().filter(|c| matches!(c, PendingChange::Delete { .. })).count();
 
         let mut list = Stack::new().gap(Size::Xs);
-        for change in &changes {
+        for change in changes {
             let accent = match change {
                 PendingChange::Update { .. } => ColorName::Blue,
                 PendingChange::Insert { .. } => ColorName::Teal,
@@ -236,8 +239,10 @@ impl DataPanel {
     pub(super) fn inspector_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         let null_display = self.app.settings.read(cx).null_display.clone();
-        let selection = self.state.selection.get(cx);
-        let response = self.state.rows.get(cx);
+        // Borrow rather than clone the whole page/selection to show one row.
+        let selection = self.state.selection.read(cx);
+        let rows_binding = self.state.rows.read(cx);
+        let response = rows_binding.as_ref();
 
         let body = match (selection.iter().max().copied(), response) {
             (Some(idx), Some(resp)) if resp.rows.get(idx).is_some() => {

@@ -25,6 +25,8 @@ impl Host {
         let start = Instant::now();
         let outcome = adapter.query(sql).await;
         let ms = elapsed_ms(start);
+        // The statement may have been DDL — drop cached column types.
+        self.invalidate_schema_cache();
 
         match outcome {
             Ok(raw) => {
@@ -68,6 +70,8 @@ impl Host {
                 }
             }
         }
+        // Any statement in the batch may have been DDL — drop cached column types.
+        self.invalidate_schema_cache();
         Ok(results)
     }
 

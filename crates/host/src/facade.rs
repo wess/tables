@@ -18,6 +18,11 @@ pub struct Host {
     pub(crate) health: HealthMonitor,
     /// The active connection id.
     active: Mutex<Option<String>>,
+    /// `(connection, table) → column-type map`, memoized to avoid re-introspecting
+    /// on every filtered page turn and row write. Cleared whenever a statement
+    /// runs or the connection changes, so a cast can't outlive a schema change
+    /// made through the app.
+    col_types_cache: Mutex<HashMap<(String, String), HashMap<String, String>>>,
 }
 
 impl Default for Host {
@@ -32,7 +37,34 @@ impl Host {
             registry: Arc::new(Registry::default()),
             health: HealthMonitor::default(),
             active: Mutex::new(None),
+            col_types_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Column types for `table` on the active connection, memoized. Postgres
+    /// only (empty elsewhere, and on any introspection failure). The cache is
+    /// dropped by `invalidate_schema_cache` whenever the schema might change.
+    pub(crate) async fn col_types(&self, table: &str) -> HashMap<String, String> {
+        let Ok(adapter) = self.active_adapter() else {
+            return HashMap::new();
+        };
+        let dialect = adapter.dialect();
+        if dialect != Dialect::Postgres {
+            return HashMap::new();
+        }
+        let key = (self.active_connection_id().unwrap_or_default(), table.to_string());
+        if let Some(hit) = self.col_types_cache.lock().unwrap().get(&key).cloned() {
+            return hit;
+        }
+        let types = pg_col_types(&adapter, dialect, table).await;
+        self.col_types_cache.lock().unwrap().insert(key, types.clone());
+        types
+    }
+
+    /// Forget every cached column-type map. Called after any executed statement
+    /// (which may be DDL) and on connection changes.
+    pub(crate) fn invalidate_schema_cache(&self) {
+        self.col_types_cache.lock().unwrap().clear();
     }
 
     // --- active-connection cursor -------------------------------------------
@@ -94,6 +126,7 @@ impl Host {
     pub async fn delete_connection(&self, id: &str) -> bool {
         self.health.stop(id);
         self.registry.disconnect(id).await;
+        self.invalidate_schema_cache();
         keychain::delete_secret(id);
         connections::remove(id)
     }
@@ -149,6 +182,7 @@ impl Host {
     pub async fn disconnect(&self, id: &str) -> bool {
         self.health.stop(id);
         self.registry.disconnect(id).await;
+        self.invalidate_schema_cache();
         true
     }
 

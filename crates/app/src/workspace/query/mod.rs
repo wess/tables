@@ -24,9 +24,22 @@ pub(super) enum Side {
     Favorites,
 }
 
+/// Cheap heuristic: does any statement start with a schema-changing keyword? A
+/// false positive just triggers a harmless table-list refetch.
+fn is_ddl(sql: &str) -> bool {
+    sql.split(['\n', ';'])
+        .map(str::trim_start)
+        .filter_map(|s| s.split_whitespace().next())
+        .any(|word| {
+            matches!(
+                word.to_ascii_uppercase().as_str(),
+                "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME"
+            )
+        })
+}
+
 pub struct QueryPanel {
     app: AppState,
-    #[allow(dead_code)]
     state: WorkspaceState,
     editor: Entity<Editor>,
     fav_name: Entity<TextInput>,
@@ -106,13 +119,22 @@ impl QueryPanel {
         let results = self.results.clone();
         let running = self.running.clone();
         let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        // Decide once, before `sql` moves into the future, whether to refresh the
+        // sidebar's table list when this succeeds.
+        let ddl = is_ddl(&sql);
         bridge::run(
             cx,
             async move { host.execute_multi(&sql).await },
             move |outcome, cx| {
                 running.set(cx, false);
                 match outcome {
-                    Ok(list) => results.set(cx, list),
+                    Ok(list) => {
+                        results.set(cx, list);
+                        if ddl {
+                            state.bump_tables(cx);
+                        }
+                    }
                     Err(error) => {
                         results.set(cx, Vec::new());
                         toasts.error(cx, "Query failed", &error);
@@ -123,13 +145,17 @@ impl QueryPanel {
     }
 
     fn open_chart(&mut self, cx: &mut Context<Self>) {
-        let results = self.results.get(cx);
-        let Some(result) = results.iter().find(|r| !r.columns.is_empty() && !r.rows.is_empty())
-        else {
+        // Borrow to pick the chartable result, cloning only its columns/rows.
+        let picked = {
+            let results = self.results.read(cx);
+            results
+                .iter()
+                .find(|r| !r.columns.is_empty() && !r.rows.is_empty())
+                .map(|r| (r.columns.clone(), r.rows.clone()))
+        };
+        let Some((columns, rows)) = picked else {
             return;
         };
-        let columns = result.columns.clone();
-        let rows = result.rows.clone();
         let modal = cx.new(move |cx| ChartModal::new(columns, rows, cx));
         cx.subscribe(&modal, |this, _m, _e: &ChartEvent, cx| {
             this.chart_modal = None;
@@ -205,7 +231,7 @@ impl Render for QueryPanel {
             .border_color(colors.border)
             .child(self.editor.clone());
 
-        let results = self.results.get(cx);
+        let results = self.results.read(cx);
         let result_pane = if results.is_empty() {
             Center::new()
                 .child(Text::new("Run a query to see results").size(Size::Sm).dimmed())

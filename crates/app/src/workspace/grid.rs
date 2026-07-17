@@ -138,46 +138,66 @@ impl DataGrid {
 
     fn commit_edit(&mut self, text: String, cx: &mut Context<Self>) {
         if let Some(editing) = self.editing.take() {
-            if let Some(response) = self.state.rows.get(cx) {
-                if let Some(row) = response.rows.get(editing.row) {
-                    let value = if text.is_empty() { Value::Null } else { Value::String(text) };
-                    let mut changes = Row::new();
-                    changes.insert(editing.column, value);
-                    let table = self.state.active_table.get(cx).unwrap_or_default();
-                    self.state.pending.update(cx, move |pending| {
-                        pending.push(PendingChange::Update {
-                            table,
-                            primary_key: row.clone(),
-                            changes,
-                        });
+            // Read the one edited row without cloning the whole page.
+            let row = self
+                .state
+                .rows
+                .read(cx)
+                .as_ref()
+                .and_then(|r| r.rows.get(editing.row).cloned());
+            if let Some(row) = row {
+                let value = if text.is_empty() { Value::Null } else { Value::String(text) };
+                let table = self.state.active_table.get(cx).unwrap_or_default();
+                let column = editing.column;
+                self.state.pending.update(cx, move |pending| {
+                    // Coalesce into an existing update for this row so a
+                    // multi-column edit commits as ONE `UPDATE`. Separate
+                    // per-column updates each snapshot the whole row into their
+                    // WHERE, so the second statement's WHERE would no longer
+                    // match after the first ran in the same transaction — the
+                    // later edit was silently lost.
+                    let merged = pending.iter_mut().any(|change| match change {
+                        PendingChange::Update { table: t, primary_key, changes }
+                            if *t == table && pk_matches(primary_key, &row) =>
+                        {
+                            changes.insert(column.clone(), value.clone());
+                            true
+                        }
+                        _ => false,
                     });
-                }
+                    if !merged {
+                        let mut changes = Row::new();
+                        changes.insert(column, value);
+                        pending.push(PendingChange::Update { table, primary_key: row, changes });
+                    }
+                });
             }
         }
         cx.notify();
     }
 
-    fn row_mark(&self, row: &Row, cx: &gpui::App) -> (RowMark, Vec<String>) {
-        let mut mark = RowMark::None;
-        let mut changed = Vec::new();
-        for change in self.state.pending.read(cx).iter() {
-            match change {
-                PendingChange::Delete { primary_key, .. } if pk_matches(primary_key, row) => {
-                    mark = RowMark::Deleted;
-                }
-                PendingChange::Update { primary_key, changes, .. }
-                    if pk_matches(primary_key, row) =>
-                {
-                    if matches!(mark, RowMark::None) {
-                        mark = RowMark::Updated;
-                    }
-                    changed.extend(changes.keys().cloned());
-                }
-                _ => {}
+}
+
+/// Classify how the staged changes touch one rendered row. Called once per row
+/// per render, but only when there is at least one pending change.
+fn row_mark_for(row: &Row, pending: &[PendingChange]) -> (RowMark, Vec<String>) {
+    let mut mark = RowMark::None;
+    let mut changed = Vec::new();
+    for change in pending {
+        match change {
+            PendingChange::Delete { primary_key, .. } if pk_matches(primary_key, row) => {
+                mark = RowMark::Deleted;
             }
+            PendingChange::Update { primary_key, changes, .. } if pk_matches(primary_key, row) => {
+                if matches!(mark, RowMark::None) {
+                    mark = RowMark::Updated;
+                }
+                changed.extend(changes.keys().cloned());
+            }
+            _ => {}
         }
-        (mark, changed)
     }
+    (mark, changed)
 }
 
 impl Render for DataGrid {
@@ -186,6 +206,8 @@ impl Render for DataGrid {
         let null_display = self.app.settings.read(cx).null_display.clone();
         let theme = guise::theme::theme(cx);
         let yellow = theme.color(ColorName::Yellow, 6).hsla();
+        let red = theme.color(ColorName::Red, 6).hsla();
+        let blue_sel = theme.color(ColorName::Blue, 5).hsla();
         let dimmed = theme.dimmed().hsla();
         let text_color = theme.text().hsla();
         let blue_color = theme.color(ColorName::Blue, 4);
@@ -198,9 +220,27 @@ impl Render for DataGrid {
                 .into_any_element();
         }
 
-        let response = self.state.rows.get(cx).unwrap_or_default();
+        // Borrow the page instead of deep-cloning every row each render.
+        let rows_binding = self.state.rows.read(cx);
+        let Some(response) = rows_binding.as_ref() else {
+            return div()
+                .flex()
+                .size_full()
+                .child(Center::new().child(Text::new("No rows").size(Size::Sm).dimmed()))
+                .into_any_element();
+        };
         let sort = self.state.sort.get(cx);
         let selection = self.state.selection.get(cx);
+
+        // Precompute per-row change marks once. When nothing is staged (the
+        // common case) this is skipped entirely, so the render loop does no
+        // pending scan at all.
+        let pending = self.state.pending.read(cx);
+        let marks: Vec<(RowMark, Vec<String>)> = if pending.is_empty() {
+            Vec::new()
+        } else {
+            response.rows.iter().map(|row| row_mark_for(row, pending)).collect()
+        };
 
         // Column widths and the total content width (drives horizontal scroll).
         let widths: Vec<f32> = columns.iter().map(|c| self.col_width(c)).collect();
@@ -268,15 +308,16 @@ impl Render for DataGrid {
 
         // Body.
         let mut body = div().flex().flex_col();
+        let default_mark = (RowMark::None, Vec::new());
         for (idx, row) in response.rows.iter().enumerate() {
-            let (mark, changed) = self.row_mark(row, cx);
+            let (mark, changed) = marks.get(idx).unwrap_or(&default_mark);
             let selected = selection.contains(&idx);
             let bg = if selected {
-                Some(Hsla { h: 0.62, s: 0.6, l: 0.5, a: 0.22 })
+                Some(Hsla { a: 0.22, ..blue_sel })
             } else {
                 match mark {
-                    RowMark::Deleted => Some(Hsla { h: 0.0, s: 0.65, l: 0.5, a: 0.12 }),
-                    RowMark::Updated => Some(Hsla { h: 0.13, s: 0.75, l: 0.5, a: 0.10 }),
+                    RowMark::Deleted => Some(Hsla { a: 0.12, ..red }),
+                    RowMark::Updated => Some(Hsla { a: 0.10, ..yellow }),
                     RowMark::None if idx % 2 == 1 => Some(colors.grid_stripe),
                     RowMark::None => None,
                 }

@@ -60,6 +60,16 @@ impl Workspace {
         watch(cx, &state.rows);
         watch(cx, &state.ai_open);
 
+        // Refetch the table list whenever `tables_epoch` bumps (after DDL or an
+        // explicit refresh). `use_effect` observes changes only, so this never
+        // double-loads on mount — the initial fetch comes from `load`.
+        {
+            let (effect_app, effect_state) = (app.clone(), state.clone());
+            use_effect(cx, &state.tables_epoch, move |_, cx| {
+                reload_tables(&effect_app, &effect_state, cx);
+            });
+        }
+
         let sidebar = {
             let state = state.clone();
             cx.new(move |cx| Sidebar::new(state, cx))
@@ -213,25 +223,7 @@ impl Workspace {
             move |list, cx| databases.set(cx, list),
         );
 
-        let tables = self.state.tables.clone();
-        let loading = self.state.tables_loading.clone();
-        let error = self.state.tables_error.clone();
-        loading.set(cx, true);
-        bridge::run(
-            cx,
-            async move { host.list_tables(&id).await },
-            move |result, cx| {
-                loading.set(cx, false);
-                match result {
-                    Ok(list) => {
-                        error.set(cx, None);
-                        tables.set(cx, list);
-                    }
-                    // Keep any previously loaded tables; surface the failure.
-                    Err(e) => error.set(cx, Some(e)),
-                }
-            },
-        );
+        reload_tables(&self.app, &self.state, cx);
     }
 
     fn leave(&self, cx: &mut Context<Self>) {
@@ -240,6 +232,32 @@ impl Workspace {
         bridge::run(cx, async move { host.disconnect(&id).await }, |_, _| {});
         self.app.route.set(cx, Route::Home);
     }
+}
+
+/// Refetch the connection's table list, keeping the prior list on failure.
+/// Driven both by the initial load and by `tables_epoch` bumps (schema refresh
+/// after DDL, or the sidebar's refresh control).
+fn reload_tables(app: &AppState, state: &WorkspaceState, cx: &mut gpui::App) {
+    let host = app.host.clone();
+    let id = state.connection_id.clone();
+    let tables = state.tables.clone();
+    let loading = state.tables_loading.clone();
+    let error = state.tables_error.clone();
+    loading.set(cx, true);
+    bridge::run(
+        cx,
+        async move { host.list_tables(&id).await },
+        move |result, cx| {
+            loading.set(cx, false);
+            match result {
+                Ok(list) => {
+                    error.set(cx, None);
+                    tables.set(cx, list);
+                }
+                Err(e) => error.set(cx, Some(e)),
+            }
+        },
+    );
 }
 
 impl Render for Workspace {
@@ -281,6 +299,12 @@ impl Render for Workspace {
             .child(
                 Group::new()
                     .gap(Size::Xs)
+                    .child(
+                        ActionIcon::new("ws-refresh", "↻")
+                            .variant(Variant::Subtle)
+                            .size(Size::Sm)
+                            .on_click(cx.listener(|this, _, _, cx| this.state.bump_tables(cx))),
+                    )
                     .child(
                         ActionIcon::new("ws-search", "⌘")
                             .variant(Variant::Subtle)

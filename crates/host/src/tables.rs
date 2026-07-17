@@ -130,7 +130,7 @@ impl Host {
         // (empty for MySQL/SQLite, which coerce implicitly).
         let has_filters = req.filters.as_ref().is_some_and(|f| !f.is_empty());
         let col_types = if has_filters {
-            crate::facade::pg_col_types(&adapter, dialect, &req.table).await
+            self.col_types(&req.table).await
         } else {
             HashMap::new()
         };
@@ -148,7 +148,8 @@ impl Host {
             }
             None => String::new(),
         };
-        let offset = (req.page - 1) * req.page_size;
+        // Pages are 1-based; guard page 0 so the offset can never underflow.
+        let offset = req.page.saturating_sub(1) * req.page_size;
         let table = dialect.quote_ident(&req.table);
 
         let count = adapter
@@ -194,7 +195,7 @@ impl Host {
     pub async fn row_insert(&self, table: &str, row: &Row) -> Result<bool, String> {
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
-        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let col_types = self.col_types(table).await;
         let (sql, params) = write_stmt(
             dialect,
             &col_types,
@@ -212,7 +213,7 @@ impl Host {
     ) -> Result<bool, String> {
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
-        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let col_types = self.col_types(table).await;
         let (sql, params) = write_stmt(
             dialect,
             &col_types,
@@ -229,7 +230,7 @@ impl Host {
     pub async fn row_delete(&self, table: &str, primary_key: &Row) -> Result<bool, String> {
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
-        let col_types = crate::facade::pg_col_types(&adapter, dialect, table).await;
+        let col_types = self.col_types(table).await;
         let (sql, params) = write_stmt(
             dialect,
             &col_types,
@@ -249,8 +250,7 @@ impl Host {
         for write in writes {
             let table = write_table(write);
             if !cache.contains_key(table) {
-                let types = crate::facade::pg_col_types(&adapter, dialect, table).await;
-                cache.insert(table.to_string(), types);
+                cache.insert(table.to_string(), self.col_types(table).await);
             }
             batch.push(write_stmt(dialect, &cache[table], write));
         }
@@ -268,6 +268,7 @@ impl Host {
         let conn = connections::find(connection_id)
             .ok_or_else(|| format!("Connection not found: {connection_id}"))?;
         self.registry.disconnect(connection_id).await;
+        self.invalidate_schema_cache();
         let mut config = conn.config();
         config.database = database.to_string();
         self.registry.connect(&config).await?;

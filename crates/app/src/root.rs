@@ -8,6 +8,7 @@ use gpui::prelude::*;
 use gpui::{div, Context, Entity, Window};
 use guise::prelude::*;
 
+use crate::bridge;
 use crate::home::Home;
 use crate::state::{AppState, Route};
 use crate::toasts::Toasts;
@@ -76,6 +77,15 @@ impl Render for Root {
             Route::Workspace(id) => {
                 let stale = self.workspace.as_ref().map(|(wid, _)| wid != &id).unwrap_or(true);
                 if stale {
+                    // Replacing the cached workspace: disconnect the one we're
+                    // dropping so its health monitor and pooled connection don't
+                    // linger after its view is gone.
+                    if let Some((old_id, _)) = self.workspace.take() {
+                        if old_id != id {
+                            let host = self.state.host.clone();
+                            bridge::run(cx, async move { host.disconnect(&old_id).await }, |_, _| {});
+                        }
+                    }
                     let for_view = id.clone();
                     let view = cx.new(|cx| Workspace::new(for_view, cx));
                     self.workspace = Some((id.clone(), view));

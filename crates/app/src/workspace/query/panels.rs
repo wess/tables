@@ -16,8 +16,10 @@ fn short_time(iso: &str) -> String {
 
 fn preview(sql: &str) -> String {
     let one_line = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.len() > 120 {
-        format!("{}…", &one_line[..120])
+    // Count by chars, not bytes — a byte slice at 120 would panic on any
+    // multi-byte character straddling that offset (ordinary in non-ASCII SQL).
+    if one_line.chars().count() > 120 {
+        format!("{}…", one_line.chars().take(120).collect::<String>())
     } else {
         one_line
     }

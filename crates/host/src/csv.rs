@@ -66,6 +66,7 @@ pub fn csv_to_insert_sql(dialect: Dialect, table: &str, csv: &str, delimiter: &s
         return Vec::new();
     }
 
+    let width = headers.len();
     let cols = headers
         .iter()
         .map(|h| dialect.quote_ident(h.trim()))
@@ -73,10 +74,11 @@ pub fn csv_to_insert_sql(dialect: Dialect, table: &str, csv: &str, delimiter: &s
         .join(", ");
     rows.iter()
         .map(|row| {
-            let vals = row
-                .iter()
-                .map(|v| {
-                    let trimmed = v.trim();
+            // Normalize to the header width: a short row pads with NULLs, a long
+            // row is truncated, so the column/value counts always match.
+            let vals = (0..width)
+                .map(|i| {
+                    let trimmed = row.get(i).map(|s| s.trim()).unwrap_or("");
                     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
                         "NULL".to_string()
                     } else if numeric.is_match(trimmed) {
@@ -110,17 +112,18 @@ pub fn csv_to_insert_params(
         return Vec::new();
     }
     let names: Vec<String> = headers.iter().map(|h| h.trim().to_string()).collect();
+    let width = names.len();
     let cols = names.iter().map(|h| dialect.quote_ident(h)).collect::<Vec<_>>().join(", ");
     let quoted_table = dialect.quote_ident(table);
 
     rows.iter()
         .map(|row| {
             let mut params: Vec<Value> = Vec::new();
-            let vals: Vec<String> = row
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let trimmed = v.trim();
+            // Normalize to the header width: a short row pads with NULLs, a long
+            // row is truncated, so the column/placeholder counts always match.
+            let vals: Vec<String> = (0..width)
+                .map(|i| {
+                    let trimmed = row.get(i).map(|s| s.trim()).unwrap_or("");
                     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
                         return "NULL".to_string();
                     }
@@ -209,5 +212,25 @@ mod tests {
     #[test]
     fn returns_no_statements_for_empty_input() {
         assert_eq!(csv_to_insert_sql(PG, "t", "", ","), Vec::<String>::new());
+    }
+
+    #[test]
+    fn pads_short_rows_and_truncates_long_rows_to_header_width() {
+        // A short row (one value, two columns) pads with NULL; a long row (three
+        // values, two columns) drops the extra so column/value counts match.
+        let sql = csv_to_insert_sql(PG, "t", "a,b\n1\n2,3,4", ",");
+        assert_eq!(sql[0], r#"INSERT INTO "t" ("a", "b") VALUES (1, NULL)"#);
+        assert_eq!(sql[1], r#"INSERT INTO "t" ("a", "b") VALUES (2, 3)"#);
+    }
+
+    #[test]
+    fn params_builder_keeps_columns_and_placeholders_balanced() {
+        let stmts = csv_to_insert_params(PG, "t", "a,b\n1\n2,3,4", ",", &HashMap::new());
+        // Short row: one bound value, second column NULL.
+        assert_eq!(stmts[0].0, r#"INSERT INTO "t" ("a", "b") VALUES ($1, NULL)"#);
+        assert_eq!(stmts[0].1, vec![Value::String("1".into())]);
+        // Long row: truncated to two placeholders.
+        assert_eq!(stmts[1].0, r#"INSERT INTO "t" ("a", "b") VALUES ($1, $2)"#);
+        assert_eq!(stmts[1].1, vec![Value::String("2".into()), Value::String("3".into())]);
     }
 }

@@ -9,9 +9,7 @@ use guise::prelude::*;
 
 use crate::toasts::Toasts;
 use host::Host;
-use model::{
-    FilterCondition, MacroStep, RowsResponse, Settings, SortSpec, StoredConnection, TableInfo,
-};
+use model::{FilterCondition, RowsResponse, Settings, SortSpec, StoredConnection, TableInfo};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
@@ -96,15 +94,6 @@ pub struct WorkspaceState {
     pub rows_epoch: Signal<u64>,
     pub tables_epoch: Signal<u64>,
 
-    /// Macro recording: `Some(steps)` while the red dot is live.
-    pub recording: Signal<Option<Vec<MacroStep>>>,
-
-    // Workspace-level modals.
-    pub settings_open: Signal<bool>,
-    pub macros_open: Signal<bool>,
-    pub compare_open: Signal<bool>,
-    pub diagram_open: Signal<bool>,
-
     /// The slide-out AI assistant column.
     pub ai_open: Signal<bool>,
 }
@@ -137,11 +126,6 @@ impl WorkspaceState {
             pending: Signal::new(cx, Vec::new()),
             rows_epoch: Signal::new(cx, 0),
             tables_epoch: Signal::new(cx, 0),
-            recording: Signal::new(cx, None),
-            settings_open: Signal::new(cx, false),
-            macros_open: Signal::new(cx, false),
-            compare_open: Signal::new(cx, false),
-            diagram_open: Signal::new(cx, false),
             ai_open: Signal::new(cx, false),
         }
     }
@@ -190,25 +174,5 @@ impl WorkspaceState {
 
     pub fn bump_tables(&self, cx: &mut gpui::App) {
         self.tables_epoch.update(cx, |n| *n += 1);
-    }
-
-    /// Record a macro step when recording is live.
-    pub fn record_step(
-        &self,
-        cx: &mut gpui::App,
-        action: &str,
-        params: serde_json::Map<String, serde_json::Value>,
-    ) {
-        if self.recording.read(cx).is_some() {
-            let step = MacroStep {
-                action: action.to_string(),
-                params,
-            };
-            self.recording.update(cx, |steps| {
-                if let Some(steps) = steps {
-                    steps.push(step);
-                }
-            });
-        }
     }
 }

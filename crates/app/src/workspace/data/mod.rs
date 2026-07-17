@@ -27,6 +27,8 @@ pub struct DataPanel {
     filter: Entity<FilterPanel>,
     insert: Option<Entity<InsertModal>>,
     show_review: bool,
+    /// True while the toolbar "Discard" confirmation is up.
+    confirm_discard: bool,
     committing: Signal<bool>,
     /// True while an async toolbar action (generate / import / export) runs, so
     /// the toolbar can show a spinner and disable those buttons.
@@ -68,6 +70,7 @@ impl DataPanel {
             filter,
             insert: None,
             show_review: false,
+            confirm_discard: false,
             committing,
             busy,
         }
@@ -216,6 +219,27 @@ impl Render for DataPanel {
         }
         if let Some(modal) = &self.insert {
             root = root.child(modal.clone());
+        }
+        if self.confirm_discard {
+            let count = self.state.pending.read(cx).len();
+            root = root.child(
+                ConfirmModal::new()
+                    .title("Discard changes")
+                    .message(format!(
+                        "Discard {count} staged change(s)? This cannot be undone."
+                    ))
+                    .confirm_label("Discard")
+                    .cancel_label("Keep")
+                    .danger()
+                    .on_confirm(cx.listener(|this, _, _, cx| {
+                        this.confirm_discard = false;
+                        this.discard(cx);
+                    }))
+                    .on_cancel(cx.listener(|this, _, _, cx| {
+                        this.confirm_discard = false;
+                        cx.notify();
+                    })),
+            );
         }
 
         root.into_any_element()

@@ -112,7 +112,12 @@ impl Home {
             cx,
             async move { host.save_connection(&conn) },
             move |result, cx| match result {
-                Ok(_) => reload_into(host_reload, connections, loading, cx),
+                Ok(saved) => {
+                    reload_into(host_reload, connections, loading, cx);
+                    let what =
+                        if saved.name.is_empty() { "Connection".to_string() } else { saved.name };
+                    toasts.success(cx, &format!("{what} saved"), 1500);
+                }
                 Err(error) => toasts.error(cx, "Save failed", &error),
             },
         );
@@ -129,11 +134,19 @@ impl Home {
             let host_reload = host.clone();
             let connections = self.connections.clone();
             let loading = self.loading.clone();
+            let toasts = self.state.toasts.clone();
             let id = conn.id.clone();
             bridge::run(
                 cx,
                 async move { host.delete_connection(&id).await },
-                move |_, cx| reload_into(host_reload, connections, loading, cx),
+                move |ok, cx| {
+                    reload_into(host_reload, connections, loading, cx);
+                    if ok {
+                        toasts.success(cx, "Connection deleted", 1500);
+                    } else {
+                        toasts.error(cx, "Delete failed", "The connection could not be removed.");
+                    }
+                },
             );
         }
         cx.notify();
