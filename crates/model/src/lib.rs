@@ -24,7 +24,7 @@ pub use plugin::{InstalledPlugin, PluginManifest};
 pub use query::{
     FilterCondition, QueryResult, RawResult, Row, RowWrite, RowsRequest, RowsResponse, SortSpec,
 };
-pub use schema::{ColumnInfo, ForeignKeyInfo, IndexInfo, TableInfo, TableStructure};
+pub use schema::{ColumnInfo, ForeignKeyInfo, IndexInfo, NewColumn, TableInfo, TableStructure};
 pub use settings::Settings;
 pub use transfer::{ExportFileResult, ImportResult, ImportSqlResult};
 pub use util::{iso_now, new_uuid};

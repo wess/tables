@@ -9,6 +9,7 @@ use gpui::{
 };
 use guise::prelude::*;
 
+use super::structedit::{EditOp, StructEditEvent, StructEditModal};
 use crate::bridge;
 use crate::state::{AppState, WorkspaceState};
 use model::TableInfo;
@@ -19,6 +20,10 @@ pub struct Sidebar {
     search: Entity<TextInput>,
     /// The per-table "Generate SQL" context menu, rebuilt on each right-click.
     menu: Option<Entity<ContextMenu>>,
+    /// The create-table modal.
+    edit: Option<Entity<StructEditModal>>,
+    /// A table pending drop-confirmation.
+    confirm_drop: Option<String>,
 }
 
 impl Sidebar {
@@ -38,7 +43,71 @@ impl Sidebar {
         })
         .detach();
 
-        Sidebar { app, state, search, menu: None }
+        Sidebar { app, state, search, menu: None, edit: None, confirm_drop: None }
+    }
+
+    // --- create / drop table -------------------------------------------------
+
+    fn open_create_table(&mut self, cx: &mut Context<Self>) {
+        let modal = cx.new(StructEditModal::create_table);
+        cx.subscribe(&modal, |this, _m, event: &StructEditEvent, cx| match event {
+            StructEditEvent::Cancel => {
+                this.edit = None;
+                cx.notify();
+            }
+            StructEditEvent::Submit(EditOp::CreateTable { name, columns }) => {
+                this.run_create_table(name.clone(), columns.clone(), cx);
+            }
+            // The create-table modal only ever emits CreateTable.
+            StructEditEvent::Submit(_) => {}
+        })
+        .detach();
+        self.edit = Some(modal);
+        cx.notify();
+    }
+
+    fn run_create_table(&mut self, name: String, columns: Vec<model::NewColumn>, cx: &mut Context<Self>) {
+        self.edit = None;
+        cx.notify();
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        bridge::run(
+            cx,
+            async move { host.create_table(&name, &columns).await },
+            move |result, cx| match result {
+                Ok(_) => {
+                    toasts.success(cx, "Table created", 1500);
+                    state.bump_tables(cx);
+                }
+                Err(e) => toasts.error(cx, "Create failed", &e),
+            },
+        );
+    }
+
+    fn confirm_drop_table(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.confirm_drop.take() else {
+            return;
+        };
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        let was_active = self.state.active_table.get(cx).as_deref() == Some(table.as_str());
+        bridge::run(
+            cx,
+            async move { host.drop_table(&table).await },
+            move |result, cx| match result {
+                Ok(_) => {
+                    toasts.success(cx, "Table dropped", 1500);
+                    if was_active {
+                        state.active_table.set(cx, None);
+                    }
+                    state.bump_tables(cx);
+                }
+                Err(e) => toasts.error(cx, "Drop failed", &e),
+            },
+        );
+        cx.notify();
     }
 
     /// Build and show the "Generate SQL" menu for `table` at the cursor.
@@ -52,6 +121,7 @@ impl Sidebar {
         let host = self.app.host.clone();
         let toasts = self.app.toasts.clone();
         let t = table.to_string();
+        let this = cx.entity();
 
         // Copy `sql` to the clipboard and toast; shared by every item.
         let copy = move |label: &'static str, sql: String, cx: &mut gpui::App| {
@@ -100,11 +170,20 @@ impl Sidebar {
                     );
                 }
             });
-            m.divider().danger_item("Copy DROP", {
+            let m = m.item("Copy DROP", {
                 let (host, t, copy) = (host.clone(), t.clone(), copy);
                 move |_w, cx| match host.generate_drop(&t) {
                     Ok(sql) => copy("DROP", sql, cx),
                     Err(e) => AppState::get(cx).toasts.error(cx, "Failed", &e),
+                }
+            });
+            m.divider().danger_item("Drop Table…", {
+                let (this, t) = (this.clone(), t.clone());
+                move |_w, cx| {
+                    this.update(cx, |s, cx| {
+                        s.confirm_drop = Some(t.clone());
+                        cx.notify();
+                    });
                 }
             })
         });
@@ -233,11 +312,20 @@ impl Render for Sidebar {
                 // Sticky filter header above the scrolling list.
                 div()
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
                     .px(px(6.0))
                     .py(px(6.0))
                     .border_b_1()
                     .border_color(colors.border)
-                    .child(self.search.clone()),
+                    .child(div().flex_1().min_w(px(0.0)).child(self.search.clone()))
+                    .child(
+                        ActionIcon::new("sb-new-table", "＋")
+                            .size(Size::Sm)
+                            .variant(Variant::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_create_table(cx))),
+                    ),
             )
             .child(
                 div()
@@ -250,6 +338,24 @@ impl Render for Sidebar {
             );
         if let Some(menu) = &self.menu {
             root = root.child(menu.clone());
+        }
+        if let Some(edit) = &self.edit {
+            root = root.child(edit.clone());
+        }
+        if let Some(table) = &self.confirm_drop {
+            root = root.child(
+                ConfirmModal::new()
+                    .title("Drop Table")
+                    .message(format!("Drop table \"{table}\"? This cannot be undone."))
+                    .confirm_label("Drop")
+                    .cancel_label("Cancel")
+                    .danger()
+                    .on_confirm(cx.listener(|this, _, _, cx| this.confirm_drop_table(cx)))
+                    .on_cancel(cx.listener(|this, _, _, cx| {
+                        this.confirm_drop = None;
+                        cx.notify();
+                    })),
+            );
         }
         root.into_any_element()
     }

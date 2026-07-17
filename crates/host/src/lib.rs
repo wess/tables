@@ -7,6 +7,7 @@ pub mod mock;
 pub mod values;
 
 mod data;
+mod ddl;
 mod facade;
 mod generate;
 mod query;

@@ -1,11 +1,14 @@
 //! The Structure tab: a sub-tabbed view of the active table's columns, indexes,
-//! foreign keys, DDL, and per-column profile. Structure is fetched when the
-//! table changes; DDL and Profile are fetched lazily when first viewed.
+//! foreign keys, DDL, and per-column profile. Columns and indexes are editable
+//! (add/rename/drop, create index) through the structure-edit modal; the rest
+//! are read-only. Structure is fetched when the table changes; DDL and Profile
+//! are fetched lazily when first viewed.
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Window};
+use gpui::{div, px, Context, Entity, SharedString, Window};
 use guise::prelude::*;
 
+use super::structedit::{EditOp, StructEditEvent, StructEditModal};
 use crate::bridge;
 use crate::state::{AppState, WorkspaceState};
 use model::{ColumnProfile, TableStructure};
@@ -19,6 +22,12 @@ enum Tab {
     Profile,
 }
 
+/// A pending drop awaiting confirmation.
+enum DropTarget {
+    Column(String),
+    Index(String),
+}
+
 pub struct StructurePanel {
     app: AppState,
     state: WorkspaceState,
@@ -26,6 +35,8 @@ pub struct StructurePanel {
     ddl: Signal<Option<String>>,
     profile: Signal<Option<Vec<ColumnProfile>>>,
     tab: Signal<Tab>,
+    edit: Option<Entity<StructEditModal>>,
+    confirm: Option<DropTarget>,
 }
 
 impl StructurePanel {
@@ -51,31 +62,20 @@ impl StructurePanel {
                 effect_structure.set(cx, None);
                 return;
             };
-            let host = effect_app.host.clone();
-            let out = effect_structure.clone();
-            let toasts = effect_app.toasts.clone();
             // Ignore a completion for a table that is no longer selected.
-            let owner = effect_active.clone();
-            let want = table.clone();
-            bridge::run(
-                cx,
-                async move { host.table_structure(&table).await },
-                move |result, cx| {
-                    if owner.get(cx).as_deref() != Some(want.as_str()) {
-                        return;
-                    }
-                    match result {
-                        Ok(structure) => out.set(cx, Some(structure)),
-                        Err(error) => {
-                            out.set(cx, None);
-                            toasts.error(cx, "Structure failed", &error);
-                        }
-                    }
-                },
-            );
+            fetch_structure(&effect_app, &effect_structure, Some(&effect_active), table, cx);
         });
 
-        StructurePanel { app, state, structure, ddl, profile, tab }
+        StructurePanel {
+            app,
+            state,
+            structure,
+            ddl,
+            profile,
+            tab,
+            edit: None,
+            confirm: None,
+        }
     }
 
     fn select_tab(&self, tab: Tab, cx: &mut gpui::App) {
@@ -85,6 +85,107 @@ impl StructurePanel {
             Tab::Profile if self.profile.read(cx).is_none() => self.fetch_profile(cx),
             _ => {}
         }
+    }
+
+    // --- edit entry points ---------------------------------------------------
+
+    fn open_edit(&mut self, modal: Entity<StructEditModal>, cx: &mut Context<Self>) {
+        cx.subscribe(&modal, |this, _m, event: &StructEditEvent, cx| match event {
+            StructEditEvent::Cancel => {
+                this.edit = None;
+                cx.notify();
+            }
+            StructEditEvent::Submit(op) => this.run_op(op, cx),
+        })
+        .detach();
+        self.edit = Some(modal);
+        cx.notify();
+    }
+
+    fn open_add_column(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.state.active_table.get(cx) else {
+            return;
+        };
+        let modal = cx.new(|cx| StructEditModal::add_column(table, cx));
+        self.open_edit(modal, cx);
+    }
+
+    fn open_rename_column(&mut self, column: String, cx: &mut Context<Self>) {
+        let Some(table) = self.state.active_table.get(cx) else {
+            return;
+        };
+        let modal = cx.new(|cx| StructEditModal::rename_column(table, column, cx));
+        self.open_edit(modal, cx);
+    }
+
+    fn open_create_index(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.state.active_table.get(cx) else {
+            return;
+        };
+        let columns = self
+            .structure
+            .read(cx)
+            .as_ref()
+            .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let modal = cx.new(|cx| StructEditModal::create_index(table, columns, cx));
+        self.open_edit(modal, cx);
+    }
+
+    // `op` is expressed against the active table; the modal already scoped it.
+    fn run_op(&mut self, op: &EditOp, cx: &mut Context<Self>) {
+        self.edit = None;
+        cx.notify();
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        let app = self.app.clone();
+        let structure = self.structure.clone();
+        let table = op_table(op);
+        let fut = op_future(host, op);
+        bridge::run(cx, fut, move |result, cx| match result {
+            Ok(_) => {
+                toasts.success(cx, "Structure updated", 1500);
+                state.bump_tables(cx);
+                fetch_structure(&app, &structure, None, table, cx);
+            }
+            Err(e) => toasts.error(cx, "Change failed", &e),
+        });
+    }
+
+    fn request_drop(&mut self, target: DropTarget, cx: &mut Context<Self>) {
+        self.confirm = Some(target);
+        cx.notify();
+    }
+
+    fn confirm_drop(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirm.take() else {
+            return;
+        };
+        let Some(table) = self.state.active_table.get(cx) else {
+            return;
+        };
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        let app = self.app.clone();
+        let structure = self.structure.clone();
+        let refetch = table.clone();
+        let fut = async move {
+            match target {
+                DropTarget::Column(c) => host.drop_column(&table, &c).await,
+                DropTarget::Index(n) => host.drop_index(&table, &n).await,
+            }
+        };
+        bridge::run(cx, fut, move |result, cx| match result {
+            Ok(_) => {
+                toasts.success(cx, "Dropped", 1500);
+                state.bump_tables(cx);
+                fetch_structure(&app, &structure, None, refetch, cx);
+            }
+            Err(e) => toasts.error(cx, "Drop failed", &e),
+        });
+        cx.notify();
     }
 
     fn fetch_ddl(&self, cx: &mut gpui::App) {
@@ -120,6 +221,235 @@ impl StructurePanel {
             },
         );
     }
+
+    // --- editable views ------------------------------------------------------
+
+    fn columns_view(&self, structure: &TableStructure, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = crate::theme::palette(cx);
+        let header = div()
+            .flex()
+            .items_center()
+            .px(px(6.0))
+            .py(px(4.0))
+            .border_b_1()
+            .border_color(colors.border)
+            .child(hcell("Name"))
+            .child(hcell("Type"))
+            .child(hcell("Null"))
+            .child(hcell("Default"))
+            .child(hcell("Key"))
+            .child(div().w(px(84.0)));
+        let mut list = div().flex().flex_col();
+        for col in &structure.columns {
+            let name_rename = col.name.clone();
+            let name_drop = col.name.clone();
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .border_b_1()
+                    .border_color(colors.border_subtle)
+                    .child(cell(col.name.clone()))
+                    .child(cell(col.data_type.clone()))
+                    .child(cell(if col.nullable { "YES" } else { "NO" }.to_string()))
+                    .child(cell(col.default_value.clone().unwrap_or_default()))
+                    .child(cell(if col.is_primary_key { "PK" } else { "" }.to_string()))
+                    .child(
+                        div()
+                            .w(px(84.0))
+                            .flex()
+                            .gap(px(2.0))
+                            .justify_end()
+                            .child(
+                                ActionIcon::new(
+                                    SharedString::from(format!("ren-{}", col.name)),
+                                    "✎",
+                                )
+                                .size(Size::Xs)
+                                .variant(Variant::Subtle)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_rename_column(name_rename.clone(), cx)
+                                })),
+                            )
+                            .child(
+                                ActionIcon::new(
+                                    SharedString::from(format!("dropcol-{}", col.name)),
+                                    "🗑",
+                                )
+                                .size(Size::Xs)
+                                .variant(Variant::Subtle)
+                                .color(ColorName::Red)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.request_drop(DropTarget::Column(name_drop.clone()), cx)
+                                })),
+                            ),
+                    ),
+            );
+        }
+        div().child(header).child(list).into_any_element()
+    }
+
+    fn indexes_view(&self, structure: &TableStructure, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = crate::theme::palette(cx);
+        if structure.indexes.is_empty() {
+            return Text::new("No indexes").size(Size::Sm).dimmed().into_any_element();
+        }
+        let header = div()
+            .flex()
+            .items_center()
+            .px(px(6.0))
+            .py(px(4.0))
+            .border_b_1()
+            .border_color(colors.border)
+            .child(hcell("Name"))
+            .child(hcell("Columns"))
+            .child(hcell("Type"))
+            .child(hcell("Unique"))
+            .child(div().w(px(44.0)));
+        let mut list = div().flex().flex_col();
+        for idx in &structure.indexes {
+            let name_drop = idx.name.clone();
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .border_b_1()
+                    .border_color(colors.border_subtle)
+                    .child(cell(idx.name.clone()))
+                    .child(cell(idx.columns.join(", ")))
+                    .child(cell(idx.kind.clone()))
+                    .child(cell(if idx.unique { "YES" } else { "NO" }.to_string()))
+                    .child(
+                        div().w(px(44.0)).flex().justify_end().child(
+                            ActionIcon::new(
+                                SharedString::from(format!("dropidx-{}", idx.name)),
+                                "🗑",
+                            )
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .color(ColorName::Red)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_drop(DropTarget::Index(name_drop.clone()), cx)
+                            })),
+                        ),
+                    ),
+            );
+        }
+        div().child(header).child(list).into_any_element()
+    }
+}
+
+/// Fetch the structure for `table` into `structure`. When `owner` is given, a
+/// stale completion (the active table changed meanwhile) is dropped.
+fn fetch_structure(
+    app: &AppState,
+    structure: &Signal<Option<TableStructure>>,
+    owner: Option<&Signal<Option<String>>>,
+    table: String,
+    cx: &mut gpui::App,
+) {
+    let host = app.host.clone();
+    let out = structure.clone();
+    let toasts = app.toasts.clone();
+    let owner = owner.cloned();
+    let want = table.clone();
+    bridge::run(
+        cx,
+        async move { host.table_structure(&table).await },
+        move |result, cx| {
+            if let Some(owner) = &owner {
+                if owner.get(cx).as_deref() != Some(want.as_str()) {
+                    return;
+                }
+            }
+            match result {
+                Ok(structure) => out.set(cx, Some(structure)),
+                Err(error) => {
+                    out.set(cx, None);
+                    toasts.error(cx, "Structure failed", &error);
+                }
+            }
+        },
+    );
+}
+
+/// The table an op targets (for the post-change structure refetch).
+fn op_table(op: &EditOp) -> String {
+    match op {
+        EditOp::AddColumn { table, .. }
+        | EditOp::RenameColumn { table, .. }
+        | EditOp::CreateIndex { table, .. } => table.clone(),
+        EditOp::CreateTable { name, .. } => name.clone(),
+    }
+}
+
+/// The host call for an op, cloned out so the borrow of `op` doesn't cross the
+/// await point.
+fn op_future(
+    host: std::sync::Arc<host::Host>,
+    op: &EditOp,
+) -> impl std::future::Future<Output = Result<(), String>> {
+    let op = clone_op(op);
+    async move {
+        match op {
+            EditOp::AddColumn { table, column } => {
+                host.add_column(
+                    &table,
+                    &column.name,
+                    &column.data_type,
+                    column.nullable,
+                    column.default_value.as_deref(),
+                )
+                .await
+            }
+            EditOp::RenameColumn { table, from, to } => host.rename_column(&table, &from, &to).await,
+            EditOp::CreateIndex { table, name, columns, unique } => {
+                host.create_index(&table, &name, &columns, unique).await
+            }
+            EditOp::CreateTable { name, columns } => host.create_table(&name, &columns).await,
+        }
+    }
+}
+
+fn clone_op(op: &EditOp) -> EditOp {
+    match op {
+        EditOp::AddColumn { table, column } => {
+            EditOp::AddColumn { table: table.clone(), column: column.clone() }
+        }
+        EditOp::RenameColumn { table, from, to } => {
+            EditOp::RenameColumn { table: table.clone(), from: from.clone(), to: to.clone() }
+        }
+        EditOp::CreateIndex { table, name, columns, unique } => EditOp::CreateIndex {
+            table: table.clone(),
+            name: name.clone(),
+            columns: columns.clone(),
+            unique: *unique,
+        },
+        EditOp::CreateTable { name, columns } => {
+            EditOp::CreateTable { name: name.clone(), columns: columns.clone() }
+        }
+    }
+}
+
+fn hcell(label: &str) -> impl IntoElement {
+    div().flex_1().min_w(px(0.0)).px(px(6.0)).child(Text::new(label.to_string()).size(Size::Xs).dimmed())
+}
+
+fn cell(text: String) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .text_size(px(12.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(SharedString::from(text))
 }
 
 fn table_tab(
@@ -152,6 +482,23 @@ impl Render for StructurePanel {
         let idx_count = structure.as_ref().map(|s| s.indexes.len()).unwrap_or(0);
         let fk_count = structure.as_ref().map(|s| s.foreign_keys.len()).unwrap_or(0);
 
+        // Contextual edit action for the active sub-tab.
+        let action = match active {
+            Tab::Columns => Some(
+                Button::new("st-add-col", "＋ Column")
+                    .size(Size::Xs)
+                    .variant(Variant::Subtle)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_add_column(cx))),
+            ),
+            Tab::Indexes => Some(
+                Button::new("st-add-idx", "＋ Index")
+                    .size(Size::Xs)
+                    .variant(Variant::Subtle)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_create_index(cx))),
+            ),
+            _ => None,
+        };
+
         let tabbar = div()
             .flex()
             .items_center()
@@ -169,16 +516,18 @@ impl Render for StructurePanel {
                 Text::new(format!("{col_count} cols · {idx_count} idx · {fk_count} fk"))
                     .size(Size::Xs)
                     .dimmed(),
-            );
+            )
+            .child(div().flex_1())
+            .children(action);
 
         let content = match active {
             Tab::Columns | Tab::Indexes | Tab::ForeignKeys => {
                 let Some(structure) = structure else {
-                    return loading(colors, tabbar);
+                    return loading(tabbar);
                 };
                 match active {
-                    Tab::Columns => columns_table(&structure),
-                    Tab::Indexes => indexes_table(&structure),
+                    Tab::Columns => self.columns_view(&structure, cx),
+                    Tab::Indexes => self.indexes_view(&structure, cx),
                     _ => foreign_keys_table(&structure),
                 }
             }
@@ -201,7 +550,7 @@ impl Render for StructurePanel {
             },
         };
 
-        div()
+        let mut root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -215,13 +564,36 @@ impl Render for StructurePanel {
                     .overflow_x_scroll()
                     .p(px(12.0))
                     .child(content),
-            )
-            .into_any_element()
+            );
+
+        if let Some(edit) = &self.edit {
+            root = root.child(edit.clone());
+        }
+        if let Some(target) = &self.confirm {
+            let what = match target {
+                DropTarget::Column(c) => format!("column \"{c}\""),
+                DropTarget::Index(n) => format!("index \"{n}\""),
+            };
+            root = root.child(
+                ConfirmModal::new()
+                    .title("Drop")
+                    .message(format!("Drop {what}? This cannot be undone."))
+                    .confirm_label("Drop")
+                    .cancel_label("Cancel")
+                    .danger()
+                    .on_confirm(cx.listener(|this, _, _, cx| this.confirm_drop(cx)))
+                    .on_cancel(cx.listener(|this, _, _, cx| {
+                        this.confirm = None;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        root.into_any_element()
     }
 }
 
-fn loading(colors: crate::theme::Palette, tabbar: impl IntoElement) -> gpui::AnyElement {
-    let _ = colors;
+fn loading(tabbar: impl IntoElement) -> gpui::AnyElement {
     div()
         .flex()
         .flex_col()
@@ -237,43 +609,6 @@ fn center_loader() -> gpui::AnyElement {
         .flex_1()
         .child(Center::new().child(Loader::new().size(Size::Sm)))
         .into_any_element()
-}
-
-fn columns_table(structure: &TableStructure) -> gpui::AnyElement {
-    let mut table = Table::new()
-        .with_border(true)
-        .striped(true)
-        .head(["Name", "Type", "Nullable", "Default", "Key", "Comment"]);
-    for col in &structure.columns {
-        table = table.row([
-            col.name.clone(),
-            col.data_type.clone(),
-            if col.nullable { "YES" } else { "NO" }.to_string(),
-            col.default_value.clone().unwrap_or_default(),
-            if col.is_primary_key { "PK" } else { "" }.to_string(),
-            col.comment.clone().unwrap_or_default(),
-        ]);
-    }
-    table.into_any_element()
-}
-
-fn indexes_table(structure: &TableStructure) -> gpui::AnyElement {
-    if structure.indexes.is_empty() {
-        return Text::new("No indexes").size(Size::Sm).dimmed().into_any_element();
-    }
-    let mut table = Table::new()
-        .with_border(true)
-        .striped(true)
-        .head(["Name", "Columns", "Type", "Unique"]);
-    for idx in &structure.indexes {
-        table = table.row([
-            idx.name.clone(),
-            idx.columns.join(", "),
-            idx.kind.clone(),
-            if idx.unique { "YES" } else { "NO" }.to_string(),
-        ]);
-    }
-    table.into_any_element()
 }
 
 fn foreign_keys_table(structure: &TableStructure) -> gpui::AnyElement {

@@ -50,3 +50,15 @@ pub struct TableStructure {
     pub indexes: Vec<IndexInfo>,
     pub foreign_keys: Vec<ForeignKeyInfo>,
 }
+
+/// A column definition supplied by the structure-editor UI (create table / add
+/// column). `default_value` is a raw SQL expression the user typed.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NewColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+    pub default_value: Option<String>,
+}

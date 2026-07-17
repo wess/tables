@@ -15,6 +15,7 @@ mod query;
 mod review;
 mod settings;
 mod sidebar;
+mod structedit;
 mod structure;
 
 use gpui::prelude::*;
