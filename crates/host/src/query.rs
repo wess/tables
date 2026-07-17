@@ -76,6 +76,21 @@ impl Host {
         Ok(results)
     }
 
+    /// Run every statement in `sql` atomically: they all commit or the whole
+    /// batch rolls back. Returns the total rows affected. Result sets are not
+    /// returned — this is for write batches (DDL/DML).
+    pub async fn execute_transaction(&self, sql: &str) -> Result<u64, String> {
+        let adapter = self.active_adapter()?;
+        let statements: Vec<String> =
+            split_statements(sql).into_iter().filter(|s| !s.trim().is_empty()).collect();
+        if statements.is_empty() {
+            return Ok(0);
+        }
+        let affected = adapter.exec_batch(&statements).await?;
+        self.invalidate_schema_cache();
+        Ok(affected)
+    }
+
     /// Run the query planner for `sql` and return the plan as a result set.
     /// SQLite uses `EXPLAIN QUERY PLAN`; Postgres/MySQL use plain `EXPLAIN`
     /// (never `ANALYZE`, which would execute the statement).

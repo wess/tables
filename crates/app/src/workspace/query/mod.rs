@@ -168,6 +168,36 @@ impl QueryPanel {
         self.run(sql, cx);
     }
 
+    /// Run the editor's statements atomically (all-or-nothing).
+    pub fn run_transaction(&self, cx: &mut gpui::App) {
+        let sql = self.editor.read(cx).text();
+        if sql.trim().is_empty() {
+            return;
+        }
+        self.running.set(cx, true);
+        let host = self.app.host.clone();
+        let running = self.running.clone();
+        let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        let ddl = is_ddl(&sql);
+        bridge::run(
+            cx,
+            async move { host.execute_transaction(&sql).await },
+            move |outcome, cx| {
+                running.set(cx, false);
+                match outcome {
+                    Ok(affected) => {
+                        toasts.success(cx, &format!("Committed · {affected} row(s) affected"), 2000);
+                        if ddl {
+                            state.bump_tables(cx);
+                        }
+                    }
+                    Err(error) => toasts.error(cx, "Rolled back", &error),
+                }
+            },
+        );
+    }
+
     /// Reformat the editor's SQL in place.
     pub fn format_current(&self, cx: &mut gpui::App) {
         let sql = self.editor.read(cx).text();
@@ -344,6 +374,13 @@ impl Render for QueryPanel {
                             .variant(Variant::Subtle)
                             .disabled(self.editor.read(cx).text().trim().is_empty())
                             .on_click(cx.listener(|this, _, _, cx| this.format_current(cx))),
+                    )
+                    .child(
+                        Button::new("query-tx", "⚛ Tx")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .disabled(running || self.editor.read(cx).text().trim().is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.run_transaction(cx))),
                     ),
             )
             .child(

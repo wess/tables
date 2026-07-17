@@ -10,7 +10,7 @@ use guise::prelude::*;
 use crate::bridge;
 use crate::sheet::Sheet;
 use crate::state::AppState;
-use model::{ConnectionTestResult, StoredConnection};
+use model::{ConnectionTestResult, SshConfig, SslConfig, StoredConnection};
 
 /// What the form asks `Home` to do; the actual persistence lives there.
 pub enum ConnectionFormEvent {
@@ -37,6 +37,19 @@ pub struct ConnectionForm {
     tags: Entity<TextInput>,
     startup: Entity<TextArea>,
     safe_mode: Entity<Select>,
+    // SSL.
+    ssl_mode: Entity<Select>,
+    ssl_ca: Entity<TextInput>,
+    ssl_cert: Entity<TextInput>,
+    ssl_key: Entity<TextInput>,
+    // SSH tunnel.
+    ssh_enabled: bool,
+    ssh_host: Entity<TextInput>,
+    ssh_port: Entity<NumberInput>,
+    ssh_username: Entity<TextInput>,
+    ssh_auth: Entity<Select>,
+    ssh_password: Entity<TextInput>,
+    ssh_key: Entity<TextInput>,
     test_result: Signal<Option<ConnectionTestResult>>,
     testing: Signal<bool>,
 }
@@ -139,12 +152,53 @@ impl ConnectionForm {
                 .selected(safe_index)
         });
 
+        let ssl = initial.as_ref().and_then(|c| c.ssl.clone());
+        let ssl_index = match ssl.as_ref().map(|s| s.mode.as_str()) {
+            Some("required") => 1,
+            Some("verify-ca") => 2,
+            Some("verify-identity") => 3,
+            _ => 0,
+        };
+        let ssl_mode = cx.new(move |cx| {
+            Select::new(cx)
+                .label("SSL Mode")
+                .data(["Disabled", "Required", "Verify CA", "Verify Identity"])
+                .selected(ssl_index)
+        });
+        let ssl_ca = text(cx, "CA Certificate", "/path/to/ca.pem", ssl.as_ref().and_then(|s| s.ca.clone()).unwrap_or_default());
+        let ssl_cert = text(cx, "Client Certificate", "/path/to/cert.pem", ssl.as_ref().and_then(|s| s.cert.clone()).unwrap_or_default());
+        let ssl_key = text(cx, "Client Key", "/path/to/key.pem", ssl.as_ref().and_then(|s| s.key.clone()).unwrap_or_default());
+
+        let ssh = initial.as_ref().and_then(|c| c.ssh.clone());
+        let ssh_enabled = ssh.as_ref().map(|s| s.enabled).unwrap_or(false);
+        let ssh_port_value = ssh.as_ref().map(|s| s.port as f64).filter(|p| *p > 0.0).unwrap_or(22.0);
+        let ssh_host = text(cx, "SSH Host", "bastion.example.com", ssh.as_ref().map(|s| s.host.clone()).unwrap_or_default());
+        let ssh_port = cx.new(move |cx| NumberInput::new(cx).label("SSH Port").value(ssh_port_value));
+        let ssh_username = text(cx, "SSH User", "ubuntu", ssh.as_ref().map(|s| s.username.clone()).unwrap_or_default());
+        let ssh_auth_index = match ssh.as_ref().map(|s| s.auth_method.as_str()) {
+            Some("key") => 1,
+            _ => 0,
+        };
+        let ssh_auth = cx.new(move |cx| {
+            Select::new(cx).label("SSH Auth").data(["Password", "Key"]).selected(ssh_auth_index)
+        });
+        let ssh_password = cx.new({
+            let value = ssh.as_ref().and_then(|s| s.password.clone()).unwrap_or_default();
+            move |cx| TextInput::new(cx).label("SSH Password").password(true).value(&value)
+        });
+        let ssh_key = text(cx, "SSH Key Path", "~/.ssh/id_rsa", ssh.as_ref().and_then(|s| s.key_path.clone()).unwrap_or_default());
+
         let test_result = Signal::new(cx, None::<ConnectionTestResult>);
         watch(cx, &test_result);
         let testing = Signal::new(cx, false);
         watch(cx, &testing);
-        // Re-render the form when the type changes so the sqlite/server fields swap.
+        // Re-render the form when the type / SSL / SSH-auth changes so dependent
+        // fields swap.
         cx.subscribe(&kind, |_this, _select, _event: &SelectEvent, cx| cx.notify())
+            .detach();
+        cx.subscribe(&ssl_mode, |_this, _select, _event: &SelectEvent, cx| cx.notify())
+            .detach();
+        cx.subscribe(&ssh_auth, |_this, _select, _event: &SelectEvent, cx| cx.notify())
             .detach();
 
         ConnectionForm {
@@ -163,6 +217,17 @@ impl ConnectionForm {
             tags,
             startup,
             safe_mode,
+            ssl_mode,
+            ssl_ca,
+            ssl_cert,
+            ssl_key,
+            ssh_enabled,
+            ssh_host,
+            ssh_port,
+            ssh_username,
+            ssh_auth,
+            ssh_password,
+            ssh_key,
             test_result,
             testing,
         }
@@ -195,6 +260,34 @@ impl ConnectionForm {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
+
+        let ssl_mode = match self.ssl_mode.read(cx).selected_index().unwrap_or(0) {
+            1 => "required",
+            2 => "verify-ca",
+            3 => "verify-identity",
+            _ => "disabled",
+        };
+        let ssl = (ssl_mode != "disabled").then(|| SslConfig {
+            mode: ssl_mode.to_string(),
+            ca: opt(self.ssl_ca.read(cx).text()),
+            cert: opt(self.ssl_cert.read(cx).text()),
+            key: opt(self.ssl_key.read(cx).text()),
+        });
+        let ssh = self.ssh_enabled.then(|| {
+            let auth = match self.ssh_auth.read(cx).selected_index().unwrap_or(0) {
+                1 => "key",
+                _ => "password",
+            };
+            SshConfig {
+                enabled: true,
+                host: self.ssh_host.read(cx).text(),
+                port: self.ssh_port.read(cx).value_f64().unwrap_or(22.0) as u16,
+                username: self.ssh_username.read(cx).text(),
+                auth_method: auth.to_string(),
+                password: opt(self.ssh_password.read(cx).text()),
+                key_path: opt(self.ssh_key.read(cx).text()),
+            }
+        });
         let base = self.initial.clone();
 
         StoredConnection {
@@ -208,8 +301,8 @@ impl ConnectionForm {
             password: self.password.read(cx).text(),
             color: self.color.read(cx).text(),
             filepath: opt(self.filepath.read(cx).text()),
-            ssl: base.as_ref().and_then(|c| c.ssl.clone()),
-            ssh: base.as_ref().and_then(|c| c.ssh.clone()),
+            ssl,
+            ssh,
             startup_commands: opt(self.startup.read(cx).text()),
             safe_mode,
             group: opt(self.group.read(cx).text()),
@@ -282,6 +375,67 @@ impl Render for ConnectionForm {
                     .child(self.tags.clone()),
             )
             .child(self.startup.clone());
+
+        // SSL / SSH — only meaningful for server connections.
+        if !is_sqlite {
+            let ssl_on = self.ssl_mode.read(cx).selected_index().unwrap_or(0) != 0;
+            let ssh_on = self.ssh_enabled;
+            let ssh_key_auth = self.ssh_auth.read(cx).selected_index() == Some(1);
+
+            fields = fields
+                .child(Divider::new())
+                .child(Text::new("SSL").size(Size::Xs).dimmed())
+                .child(self.ssl_mode.clone());
+            if ssl_on {
+                fields = fields
+                    .child(self.ssl_ca.clone())
+                    .child(
+                        Group::new()
+                            .grow(true)
+                            .gap(Size::Sm)
+                            .child(self.ssl_cert.clone())
+                            .child(self.ssl_key.clone()),
+                    );
+            }
+
+            fields = fields.child(Divider::new()).child(
+                Group::new()
+                    .justify(Justify::Between)
+                    .align(Align::Center)
+                    .child(Text::new("SSH Tunnel").size(Size::Xs).dimmed())
+                    .child(
+                        Button::new("form-ssh-toggle", if ssh_on { "On" } else { "Off" })
+                            .size(Size::Xs)
+                            .variant(if ssh_on { Variant::Light } else { Variant::Subtle })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ssh_enabled = !this.ssh_enabled;
+                                cx.notify();
+                            })),
+                    ),
+            );
+            if ssh_on {
+                fields = fields
+                    .child(
+                        Group::new()
+                            .grow(true)
+                            .gap(Size::Sm)
+                            .child(self.ssh_host.clone())
+                            .child(self.ssh_port.clone()),
+                    )
+                    .child(
+                        Group::new()
+                            .grow(true)
+                            .gap(Size::Sm)
+                            .child(self.ssh_username.clone())
+                            .child(self.ssh_auth.clone()),
+                    )
+                    .child(if ssh_key_auth {
+                        self.ssh_key.clone().into_any_element()
+                    } else {
+                        self.ssh_password.clone().into_any_element()
+                    });
+            }
+        }
 
         if let Some(result) = self.test_result.read(cx).clone() {
             let alert = if result.ok {
