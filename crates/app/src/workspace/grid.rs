@@ -28,6 +28,8 @@ pub struct DataGrid {
     widths: HashMap<String, f32>,
     /// The in-progress column resize, if the user is dragging a header edge.
     resize: Option<Resize>,
+    /// The per-cell context menu (copy value / set NULL).
+    menu: Option<Entity<ContextMenu>>,
 }
 
 struct Editing {
@@ -61,7 +63,7 @@ impl DataGrid {
         watch(cx, &state.selection);
         watch(cx, &state.hidden_columns);
         watch(cx, &state.pending);
-        DataGrid { app, state, editing: None, widths: HashMap::new(), resize: None }
+        DataGrid { app, state, editing: None, widths: HashMap::new(), resize: None, menu: None }
     }
 
     fn col_width(&self, column: &str) -> f32 {
@@ -147,32 +149,83 @@ impl DataGrid {
                 .and_then(|r| r.rows.get(editing.row).cloned());
             if let Some(row) = row {
                 let value = if text.is_empty() { Value::Null } else { Value::String(text) };
-                let table = self.state.active_table.get(cx).unwrap_or_default();
-                let column = editing.column;
-                self.state.pending.update(cx, move |pending| {
-                    // Coalesce into an existing update for this row so a
-                    // multi-column edit commits as ONE `UPDATE`. Separate
-                    // per-column updates each snapshot the whole row into their
-                    // WHERE, so the second statement's WHERE would no longer
-                    // match after the first ran in the same transaction — the
-                    // later edit was silently lost.
-                    let merged = pending.iter_mut().any(|change| match change {
-                        PendingChange::Update { table: t, primary_key, changes }
-                            if *t == table && pk_matches(primary_key, &row) =>
-                        {
-                            changes.insert(column.clone(), value.clone());
-                            true
-                        }
-                        _ => false,
-                    });
-                    if !merged {
-                        let mut changes = Row::new();
-                        changes.insert(column, value);
-                        pending.push(PendingChange::Update { table, primary_key: row, changes });
-                    }
-                });
+                self.stage_update(row, editing.column, value, cx);
             }
         }
+        cx.notify();
+    }
+
+    /// Stage a single-cell change, coalescing into an existing update for the
+    /// same row so a multi-column edit commits as ONE `UPDATE`. Separate
+    /// per-column updates each snapshot the whole row into their WHERE, so the
+    /// second statement's WHERE would no longer match after the first ran in the
+    /// same transaction — the later edit would be silently lost.
+    fn stage_update(&self, row: Row, column: String, value: Value, cx: &mut Context<Self>) {
+        let table = self.state.active_table.get(cx).unwrap_or_default();
+        self.state.pending.update(cx, move |pending| {
+            let merged = pending.iter_mut().any(|change| match change {
+                PendingChange::Update { table: t, primary_key, changes }
+                    if *t == table && pk_matches(primary_key, &row) =>
+                {
+                    changes.insert(column.clone(), value.clone());
+                    true
+                }
+                _ => false,
+            });
+            if !merged {
+                let mut changes = Row::new();
+                changes.insert(column, value);
+                pending.push(PendingChange::Update { table, primary_key: row, changes });
+            }
+        });
+    }
+
+    /// Explicitly set a cell to SQL NULL (distinct from clearing to an empty
+    /// string in the inline editor).
+    fn set_cell_null(&mut self, row_idx: usize, column: String, cx: &mut Context<Self>) {
+        let row = self.state.rows.read(cx).as_ref().and_then(|r| r.rows.get(row_idx).cloned());
+        if let Some(row) = row {
+            self.stage_update(row, column, Value::Null, cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the per-cell context menu (copy value / set NULL) at the cursor.
+    fn open_cell_menu(
+        &mut self,
+        row_idx: usize,
+        column: String,
+        pos: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self
+            .state
+            .rows
+            .read(cx)
+            .as_ref()
+            .and_then(|r| r.rows.get(row_idx))
+            .and_then(|r| r.get(&column))
+            .cloned();
+        let display = cell_text(value.as_ref(), "");
+        let this = cx.entity();
+        let menu = cx.new(|cx| {
+            ContextMenu::new(cx)
+                .item("Copy value", {
+                    let display = display.clone();
+                    move |_w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(display.clone()));
+                    }
+                })
+                .item("Set NULL", {
+                    let (this, column) = (this.clone(), column.clone());
+                    move |_w, cx| {
+                        this.update(cx, |grid, cx| grid.set_cell_null(row_idx, column.clone(), cx));
+                    }
+                })
+        });
+        menu.update(cx, |m, cx| m.show(pos, window, cx));
+        self.menu = Some(menu);
         cx.notify();
     }
 
@@ -386,8 +439,11 @@ impl Render for DataGrid {
                         }
                     };
                     let column = column.clone();
-                    td = td.text_color(color).child(SharedString::from(display)).on_click(
-                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    let column_menu = column.clone();
+                    td = td
+                        .text_color(color)
+                        .child(SharedString::from(display))
+                        .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                             if event.click_count() == 2 {
                                 let value =
                                     this.state.rows.read(cx).as_ref().and_then(|response| {
@@ -395,15 +451,20 @@ impl Render for DataGrid {
                                     });
                                 this.start_edit(idx, column.clone(), value.as_ref(), window, cx);
                             }
-                        }),
-                    );
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                this.open_cell_menu(idx, column_menu.clone(), ev.position, window, cx);
+                            }),
+                        );
                 }
                 tr = tr.child(td);
             }
             body = body.child(tr);
         }
 
-        div()
+        let mut scroll = div()
             .id("data-grid-scroll")
             .size_full()
             .overflow_x_scroll()
@@ -424,8 +485,11 @@ impl Render for DataGrid {
                     }
                 }),
             )
-            .child(div().flex().flex_col().w(px(total_w)).child(header).child(body))
-            .into_any_element()
+            .child(div().flex().flex_col().w(px(total_w)).child(header).child(body));
+        if let Some(menu) = &self.menu {
+            scroll = scroll.child(menu.clone());
+        }
+        scroll.into_any_element()
     }
 }
 

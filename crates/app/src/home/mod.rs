@@ -3,6 +3,7 @@
 
 pub mod card;
 pub mod form;
+mod url;
 
 use std::sync::Arc;
 
@@ -123,6 +124,24 @@ impl Home {
         );
     }
 
+    /// Open a prefilled new-connection form from a connection URL on the
+    /// clipboard.
+    fn new_from_url(&mut self, cx: &mut Context<Self>) {
+        let text = cx.read_from_clipboard().and_then(|c| c.text());
+        let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
+            self.state.toasts.error(cx, "Clipboard empty", "Copy a connection URL first.");
+            return;
+        };
+        match url::parse_conn_url(&text) {
+            Some(conn) => self.open_form(Some(conn), cx),
+            None => self.state.toasts.error(
+                cx,
+                "Unrecognized URL",
+                "Expected a postgres://, mysql://, or sqlite:// connection string.",
+            ),
+        }
+    }
+
     pub(super) fn request_delete(&mut self, conn: StoredConnection, cx: &mut Context<Self>) {
         self.pending_delete = Some(conn);
         cx.notify();
@@ -214,9 +233,18 @@ impl Render for Home {
             .child(Text::new("Open-source database client").size(Size::Xs).dimmed());
 
         let new_button = Center::new().child(
-            Button::new("new-connection", "New Connection")
-                .variant(Variant::Light)
-                .on_click(cx.listener(|this, _, _, cx| this.open_form(None, cx))),
+            Group::new()
+                .gap(Size::Xs)
+                .child(
+                    Button::new("new-connection", "New Connection")
+                        .variant(Variant::Light)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_form(None, cx))),
+                )
+                .child(
+                    Button::new("new-from-url", "From URL")
+                        .variant(Variant::Subtle)
+                        .on_click(cx.listener(|this, _, _, cx| this.new_from_url(cx))),
+                ),
         );
 
         let mut page = Stack::new().gap(Size::Lg).child(header).child(new_button);
