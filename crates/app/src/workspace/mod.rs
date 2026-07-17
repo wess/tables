@@ -20,7 +20,7 @@ mod structedit;
 mod structure;
 
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, Window};
+use gpui::{div, px, Context, Entity, PathPromptOptions, Window};
 use guise::prelude::*;
 use serde_json::Value;
 
@@ -135,6 +135,67 @@ impl Workspace {
         };
         workspace.load(cx);
         workspace
+    }
+
+    /// Dump the whole database to a chosen `.sql` file.
+    fn backup_database(&self, cx: &mut gpui::App) {
+        let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let rx = cx.prompt_for_new_path(&dir, Some("backup.sql"));
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        cx.spawn(async move |cx| {
+            let Ok(Ok(Some(path))) = rx.await else {
+                return;
+            };
+            let path = path.to_string_lossy().into_owned();
+            let _ = cx.update(|cx| {
+                bridge::run(
+                    cx,
+                    async move { host.backup_database(&path).await },
+                    move |result, cx| match result {
+                        Ok(n) => toasts.success(cx, &format!("Backed up {n} table(s)"), 2500),
+                        Err(e) => toasts.error(cx, "Backup failed", &e),
+                    },
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Run a chosen `.sql` file against the connection.
+    fn restore_database(&self, cx: &mut gpui::App) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        let host = self.app.host.clone();
+        let toasts = self.app.toasts.clone();
+        let state = self.state.clone();
+        cx.spawn(async move |cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let path = path.to_string_lossy().into_owned();
+            let _ = cx.update(|cx| {
+                bridge::run(
+                    cx,
+                    async move { host.restore_database(&path).await },
+                    move |result, cx| match result {
+                        Ok(n) => {
+                            toasts.success(cx, &format!("Ran {n} statement(s)"), 2500);
+                            state.bump_tables(cx);
+                        }
+                        Err(e) => toasts.error(cx, "Restore failed", &e),
+                    },
+                );
+            });
+        })
+        .detach();
     }
 
     fn open_sessions(&mut self, cx: &mut Context<Self>) {
@@ -406,6 +467,18 @@ impl Render for Workspace {
                             .size(Size::Xs)
                             .variant(Variant::Subtle)
                             .on_click(cx.listener(|this, _, _, cx| this.open_sessions(cx))),
+                    )
+                    .child(
+                        Button::new("ws-backup", "⭳ Backup")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| this.backup_database(cx))),
+                    )
+                    .child(
+                        Button::new("ws-restore", "⭱ Restore")
+                            .size(Size::Xs)
+                            .variant(Variant::Subtle)
+                            .on_click(cx.listener(|this, _, _, cx| this.restore_database(cx))),
                     ),
             );
 

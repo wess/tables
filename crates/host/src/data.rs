@@ -178,6 +178,56 @@ impl Host {
         Ok(rows.len() as u64)
     }
 
+    /// Dump the whole database (each base table's DDL followed by its rows as
+    /// INSERTs) to `path`. Returns the table count.
+    pub async fn backup_database(&self, path: &str) -> Result<u64, String> {
+        let adapter = self.active_adapter()?;
+        let dialect = adapter.dialect();
+        let tables = adapter.get_tables().await?;
+        let mut out = String::from("-- Tables backup\n\n");
+        let mut count = 0u64;
+        for table in tables.iter().filter(|t| t.kind == "table") {
+            if let Ok(ddl) = adapter.get_ddl(&table.name).await {
+                let ddl = ddl.trim().trim_end_matches(';');
+                if !ddl.is_empty() {
+                    out.push_str(ddl);
+                    out.push_str(";\n\n");
+                }
+            }
+            let rows = adapter
+                .query(&format!("SELECT * FROM {}", dialect.quote_ident(&table.name)))
+                .await?;
+            let inserts = insert_statements(dialect, &table.name, &rows.columns, &rows.rows, true);
+            if !inserts.is_empty() {
+                out.push_str(&inserts);
+                out.push_str("\n\n");
+            }
+            count += 1;
+        }
+        std::fs::write(path, out).map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+
+    /// Run every statement in a `.sql` file in order, stopping at the first
+    /// failure. Returns the number of statements that ran.
+    pub async fn restore_database(&self, path: &str) -> Result<u64, String> {
+        let sql = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let adapter = self.active_adapter()?;
+        let mut ran = 0u64;
+        for stmt in db::filters::split_statements(&sql) {
+            if stmt.trim().is_empty() {
+                continue;
+            }
+            adapter
+                .query(&stmt)
+                .await
+                .map_err(|e| format!("Statement {}: {e}", ran + 1))?;
+            ran += 1;
+        }
+        self.invalidate_schema_cache();
+        Ok(ran)
+    }
+
     /// Run one statement from inline text or a file path.
     pub async fn import_sql(
         &self,
