@@ -39,3 +39,5 @@ JSON persistence) → `db` (async `sqlx` engine layer) → `host` (service facad
 ## License
 
 MIT © Wess Cope
+
+♥ [Sponsor this project](https://github.com/sponsors/wess)
