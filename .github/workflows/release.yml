@@ -353,10 +353,16 @@ jobs:
         continue-on-error: true
         run: |
           $v = "${{ needs.check-version.outputs.version }}"
-          $body = gh release view "v$v" --json body -q .body
+          # `gh` hands PowerShell an array of lines, and interpolating an array
+          # joins it with spaces — which flattens the whole release body onto one
+          # line and destroys the changelog's formatting. Join it back explicitly,
+          # and write the note through a file so nothing re-splits it.
+          $body = (gh release view "v$v" --json body -q .body) -join "`n"
           if ($body -notmatch 'Windows builds are beta') {
             $note = "$body`n`n---`n**Windows builds are beta** and currently unsigned (SmartScreen may warn about an unknown publisher)."
-            gh release edit "v$v" --notes $note
+            $file = Join-Path $env:RUNNER_TEMP "notes-windows.md"
+            Set-Content -Path $file -Value $note -NoNewline -Encoding utf8
+            gh release edit "v$v" --notes-file $file
           }
         env:
           GH_TOKEN: ${{ github.token }}
@@ -404,7 +410,22 @@ jobs:
           git add packaging/scoop/tables.json
           if git diff --cached --quiet; then
             echo "Scoop manifest unchanged."
-          else
-            git commit -m "Update Scoop manifest to v${{ needs.check-version.outputs.version }}"
-            git push
+            exit 0
           fi
+          git commit -m "Update Scoop manifest to v${{ needs.check-version.outputs.version }}"
+          # This job starts after the Windows build, by which time main has often
+          # moved — the release commit is rarely the last one pushed. A plain push
+          # is then rejected non-fast-forward and the manifest silently misses the
+          # release. Rebase onto whatever landed and retry; the manifest is the
+          # only file touched, so there is nothing for a rebase to conflict with.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected — rebasing onto origin/main (attempt ${attempt})."
+            git pull --rebase --autostash origin main
+            sleep 5
+          done
+          echo "::error::Could not push the Scoop manifest after 5 attempts."
+          exit 1
