@@ -51,11 +51,26 @@ jobs:
           git tag "v${{ needs.check-version.outputs.version }}"
           git push origin "v${{ needs.check-version.outputs.version }}"
 
+      # The changelog already says what changed for the person installing this;
+      # commit subjects say which files moved. Prefer the former, and fall back
+      # to generated notes when the version has no section yet.
+      - name: Release notes
+        id: notes
+        run: |
+          if scripts/notes.sh "${{ needs.check-version.outputs.version }}" > "$RUNNER_TEMP/notes.md"; then
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No CHANGELOG section for ${{ needs.check-version.outputs.version }} — using generated notes."
+            : > "$RUNNER_TEMP/notes.md"
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ needs.check-version.outputs.version }}"
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md
+          generate_release_notes: ${{ steps.notes.outputs.generate == 'true' }}
           draft: false
 
   build:
