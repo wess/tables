@@ -70,6 +70,9 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      # Tells build.rs this build IS the release of its version, so the About
+      # card says "Released <date>" instead of "Development build".
+      TABLES_RELEASE: "1"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -142,8 +145,15 @@ jobs:
             echo "::warning::Ad-hoc build — unsigned and not notarized; Gatekeeper will warn on install."
           fi
 
+      # The in-app updater verifies a downloaded DMG against the Developer ID
+      # requirement, and against this digest when the release publishes one.
+      - name: Checksum DMG
+        run: shasum -a 256 dist/Tables.dmg | awk '{print $1}' > dist/Tables.dmg.sha256
+
       - name: Upload DMG
-        run: gh release upload "v${{ needs.check-version.outputs.version }}" dist/Tables.dmg --clobber
+        run: |
+          gh release upload "v${{ needs.check-version.outputs.version }}" \
+            dist/Tables.dmg dist/Tables.dmg.sha256 --clobber
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -159,6 +169,8 @@ jobs:
           - arch: aarch64
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      TABLES_RELEASE: "1"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -192,8 +204,21 @@ jobs:
       - name: Build + package
         run: scripts/linux.sh ${{ matrix.arch }}
 
+      # An AppImage has no signature to check, so its published SHA-256 is what
+      # the in-app updater verifies before it overwrites the running image.
+      - name: Checksum artifacts
+        run: |
+          cd dist/linux
+          for f in *.tar.gz *.deb *.AppImage; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+          done
+
       - name: Upload to release
-        run: gh release upload "v${{ needs.check-version.outputs.version }}" dist/linux/*.tar.gz dist/linux/*.deb dist/linux/*.AppImage --clobber
+        run: |
+          gh release upload "v${{ needs.check-version.outputs.version }}" \
+            dist/linux/*.tar.gz dist/linux/*.deb dist/linux/*.AppImage \
+            dist/linux/*.sha256 --clobber
         env:
           GH_TOKEN: ${{ github.token }}
 

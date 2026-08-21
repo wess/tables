@@ -95,6 +95,7 @@ impl Render for SessionsModal {
 
         let header = div()
             .flex()
+            .flex_none()
             .items_center()
             .px(px(6.0))
             .py(px(4.0))

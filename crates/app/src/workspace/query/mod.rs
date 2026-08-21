@@ -341,6 +341,7 @@ impl Render for QueryPanel {
 
         let toolbar = div()
             .flex()
+            .flex_none()
             .items_center()
             .justify_between()
             .px(px(8.0))

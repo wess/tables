@@ -228,6 +228,7 @@ impl StructurePanel {
         let colors = crate::theme::palette(cx);
         let header = div()
             .flex()
+            .flex_none()
             .items_center()
             .px(px(6.0))
             .py(px(4.0))
@@ -298,6 +299,7 @@ impl StructurePanel {
         }
         let header = div()
             .flex()
+            .flex_none()
             .items_center()
             .px(px(6.0))
             .py(px(4.0))
@@ -501,6 +503,7 @@ impl Render for StructurePanel {
 
         let tabbar = div()
             .flex()
+            .flex_none()
             .items_center()
             .gap_1()
             .px(px(8.0))

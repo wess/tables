@@ -15,7 +15,6 @@ mod insert;
 mod query;
 mod review;
 mod sessions;
-mod settings;
 mod sidebar;
 mod structedit;
 mod structure;
@@ -36,7 +35,6 @@ use erdiagram::{ErDiagramEvent, ErDiagramModal};
 use extensions::{ExtensionsEvent, ExtensionsModal};
 use query::QueryPanel;
 use sessions::{SessionsEvent, SessionsModal};
-use settings::{SettingsEvent, SettingsModal};
 use sidebar::Sidebar;
 use structure::StructurePanel;
 
@@ -49,7 +47,6 @@ pub struct Workspace {
     query: Entity<QueryPanel>,
     structure: Entity<StructurePanel>,
     assistant: Entity<AssistantPanel>,
-    settings_modal: Option<Entity<SettingsModal>>,
     compare_modal: Option<Entity<SchemaCompareModal>>,
     diagram_modal: Option<Entity<ErDiagramModal>>,
     sessions_modal: Option<Entity<SessionsModal>>,
@@ -130,7 +127,6 @@ impl Workspace {
             query,
             structure,
             assistant,
-            settings_modal: None,
             compare_modal: None,
             diagram_modal: None,
             sessions_modal: None,
@@ -277,17 +273,6 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
-        let modal = cx.new(SettingsModal::new);
-        cx.subscribe(&modal, |this, _modal, _event: &SettingsEvent, cx| {
-            this.settings_modal = None;
-            cx.notify();
-        })
-        .detach();
-        self.settings_modal = Some(modal);
-        cx.notify();
-    }
-
     fn open_compare(&mut self, cx: &mut Context<Self>) {
         let source = self.state.connection_id.clone();
         let modal = cx.new(|cx| SchemaCompareModal::new(source, cx));
@@ -414,7 +399,11 @@ impl Render for Workspace {
                         ActionIcon::new("ws-settings", "⚙")
                             .variant(Variant::Subtle)
                             .size(Size::Sm)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+                            // Root owns the settings modal, so the gear asks
+                            // for it the same way the menu item does.
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::OpenSettings), cx)
+                            }),
                     ),
             );
 
@@ -450,6 +439,7 @@ impl Render for Workspace {
 
         let tabbar = div()
             .flex()
+            .flex_none()
             .items_center()
             .justify_between()
             .px(px(8.0))
@@ -572,7 +562,6 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &crate::SchemaCompare, _, cx| this.open_compare(cx)))
             .on_action(cx.listener(|this, _: &crate::ErDiagram, _, cx| this.open_diagram(cx)))
-            .on_action(cx.listener(|this, _: &crate::OpenSettings, _, cx| this.open_settings(cx)))
             .on_action(cx.listener(|this, _: &crate::BackupDatabase, _, cx| {
                 this.backup_database(cx)
             }))
@@ -592,9 +581,6 @@ impl Render for Workspace {
             .child(main_col);
         if ai_open {
             root = root.child(self.assistant.clone());
-        }
-        if let Some(modal) = &self.settings_modal {
-            root = root.child(modal.clone());
         }
         if let Some(modal) = &self.compare_modal {
             root = root.child(modal.clone());

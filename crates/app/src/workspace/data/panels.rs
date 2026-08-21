@@ -9,6 +9,16 @@ use super::DataPanel;
 use crate::state::PendingChange;
 use crate::workspace::review::generate_sql;
 
+/// A toolbar separator.
+///
+/// Not `Divider::vertical()`, which is `h_full` — a percentage height against a
+/// `Group`, whose height is derived from its own wrapped content. That circular
+/// case resolves degenerately and throws the toolbar's second row out of its
+/// container and on top of the grid. An explicit height has no such problem.
+fn separator(color: Hsla) -> impl IntoElement {
+    div().w(px(1.0)).h(px(16.0)).flex_none().bg(color)
+}
+
 impl DataPanel {
     pub(super) fn toolbar(&self, cx: &mut Context<Self>, border: Hsla) -> impl IntoElement {
         let has_selection = !self.state.selection.read(cx).is_empty();
@@ -45,7 +55,7 @@ impl DataPanel {
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.generate_data(cx))),
             )
-            .child(Divider::vertical())
+            .child(separator(border))
             .child(
                 Button::new("data-filter", "Filter")
                     .size(Size::Xs)
@@ -84,7 +94,7 @@ impl DataPanel {
                     .disabled(!has_selection)
                     .on_click(cx.listener(|this, _, _, cx| this.copy_as_insert(cx))),
             )
-            .child(Divider::vertical())
+            .child(separator(border))
             .child(
                 Button::new("data-import", "Import")
                     .size(Size::Xs)
@@ -116,7 +126,7 @@ impl DataPanel {
 
         if pending > 0 {
             actions = actions
-                .child(Divider::vertical())
+                .child(separator(border))
                 .child(
                     Badge::new(format!("{pending} pending"))
                         .variant(Variant::Light)
@@ -144,8 +154,12 @@ impl DataPanel {
                 );
         }
 
+        // `flex_none`, because a `Group` wraps by default: in a flex column a
+        // shrinkable bar is squeezed under its wrapped height and the second
+        // row of buttons lands on top of the grid.
         div()
             .flex()
+            .flex_none()
             .items_center()
             .px(px(8.0))
             .py(px(6.0))

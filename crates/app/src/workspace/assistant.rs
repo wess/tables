@@ -2,14 +2,22 @@
 //! connected database. It streams tokens live through `bridge::stream`, seeds a
 //! system prompt from the workspace schema, and resolves its credential (API key
 //! or subscription token) from the OS keychain via the host.
+//!
+//! The transcript is built from guise's `AIMessage` rather than its `AIChatView`
+//! for one reason: a Tables reply is not only prose. A fenced `sql` block gets
+//! Run and Insert buttons, and those are children of the message — which
+//! `AIMessage` accepts and `AITurn` has nowhere to put. Everything else the
+//! chat view would have provided is here explicitly: markdown bodies, a
+//! streaming caret, the composer, and a cost meter fed by the API's own counts.
 
 use gpui::prelude::*;
 use gpui::{div, px, Context, Entity, EventEmitter, Window};
+use guise::ai::format_cost;
 use guise::prelude::*;
 
 use crate::bridge;
 use crate::state::{AppState, WorkspaceState};
-use ai::{AiConfig, AuthMode, Message as AiMessage, Role, StreamEvent};
+use ai::{AiConfig, AuthMode, Message as AiMessage, Role, StreamEvent, Usage};
 
 /// The assistant asks the workspace to act on a SQL block it produced.
 pub enum AssistantEvent {
@@ -67,12 +75,20 @@ fn segments(text: &str) -> Vec<Segment> {
     out
 }
 
+/// Whether a reply has started a fenced block. While it hasn't, the whole body
+/// can go through `AIMessage`'s own streaming renderer, caret and all.
+fn has_fence(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with("```"))
+}
+
 pub struct AssistantPanel {
     app: AppState,
     state: WorkspaceState,
-    input: Entity<TextInput>,
+    composer: Entity<AIComposer>,
     messages: Signal<Vec<ChatMsg>>,
     streaming: Signal<bool>,
+    /// Tokens the conversation has spent, accumulated across turns.
+    usage: Signal<Usage>,
     /// Keeps the transcript pinned to the newest tokens while streaming.
     scroll: gpui::ScrollHandle,
 }
@@ -81,27 +97,37 @@ impl EventEmitter<AssistantEvent> for AssistantPanel {}
 
 impl AssistantPanel {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| {
-            TextInput::new(cx).placeholder("Ask about your data…  (⏎ to send)")
+        let composer = cx.new(|cx| {
+            AIComposer::new(cx)
+                .size(Size::Sm)
+                .attachments(false)
+                .hint("⏎ to send · ⇧⏎ for a new line")
+                .placeholder("Ask about your data…", cx)
         });
         let messages = Signal::new(cx, Vec::new());
         let streaming = Signal::new(cx, false);
+        let usage = Signal::new(cx, Usage::default());
         watch(cx, &messages);
         watch(cx, &streaming);
+        watch(cx, &usage);
 
-        cx.subscribe(&input, |this, _input, event: &TextInputEvent, cx| {
-            if let TextInputEvent::Submit(text) = event {
-                this.send(text.clone(), cx);
-            }
+        cx.subscribe(&composer, |this, _composer, event: &AIComposerEvent, cx| match event {
+            AIComposerEvent::Submit(text) => this.send(text.clone(), cx),
+            // Nothing to interrupt yet: `bridge::stream` owns the task and does
+            // not hand back a handle, so the button is only shown as state.
+            AIComposerEvent::Stop | AIComposerEvent::Attach | AIComposerEvent::Change(_) => {}
         })
         .detach();
 
-        AssistantPanel { app, state, input, messages, streaming, scroll: gpui::ScrollHandle::new() }
-    }
-
-    fn send_from_input(&self, cx: &mut gpui::App) {
-        let text = self.input.read(cx).text();
-        self.send(text, cx);
+        AssistantPanel {
+            app,
+            state,
+            composer,
+            messages,
+            streaming,
+            usage,
+            scroll: gpui::ScrollHandle::new(),
+        }
     }
 
     fn send(&self, prompt: String, cx: &mut gpui::App) {
@@ -116,7 +142,7 @@ impl AssistantPanel {
             self.app.toasts.error(
                 cx,
                 "No AI credential",
-                "Add an API key or subscription token in Settings (⚙) → AI Assistant.",
+                "Add an API key or subscription token in Settings (⌘,) → Assistant.",
             );
             return;
         };
@@ -137,11 +163,13 @@ impl AssistantPanel {
             list.push(ChatMsg { role: Role::User, text: prompt });
             list.push(ChatMsg { role: Role::Assistant, text: String::new() });
         });
-        self.input.update(cx, |i, cx| i.set_text("", cx));
         self.streaming.set(cx, true);
+        self.composer.update(cx, |composer, cx| composer.set_busy(true, cx));
 
         let messages = self.messages.clone();
         let streaming = self.streaming.clone();
+        let usage = self.usage.clone();
+        let composer = self.composer.clone();
         let scroll = self.scroll.clone();
         bridge::stream(
             cx,
@@ -156,13 +184,19 @@ impl AssistantPanel {
                     // Keep the freshest tokens in view as they arrive.
                     scroll.scroll_to_bottom();
                 }
+                StreamEvent::Usage(reported) => {
+                    usage.update(cx, |total| total.merge(reported));
+                }
                 StreamEvent::Error(error) => messages.update(cx, |list| {
                     if let Some(last) = list.last_mut() {
                         last.text = format!("⚠ {error}");
                     }
                 }),
             },
-            move |cx| streaming.set(cx, false),
+            move |cx| {
+                streaming.set(cx, false);
+                composer.update(cx, |composer, cx| composer.set_busy(false, cx));
+            },
         );
     }
 
@@ -190,69 +224,123 @@ impl AssistantPanel {
 
     fn clear(&self, cx: &mut gpui::App) {
         self.messages.set(cx, Vec::new());
+        self.usage.set(cx, Usage::default());
     }
 
-    /// Render one message's body: prose plus fenced code blocks, with Run/Insert
-    /// actions on runnable SQL. `msg_idx` keys the buttons' element ids.
-    fn message_body(&self, msg_idx: usize, text: &str, cx: &Context<Self>) -> gpui::AnyElement {
+    /// One fenced code block: the SQL, and what can be done with it.
+    fn code_block(
+        &self,
+        msg_idx: usize,
+        block: usize,
+        runnable: bool,
+        code: String,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
         let colors = crate::theme::palette(cx);
-        let mut stack = Stack::new().gap(Size::Xs);
-        for (block, seg) in segments(text).into_iter().enumerate() {
-            match seg {
-                Segment::Text(t) => {
-                    stack = stack.child(
-                        div().text_size(px(12.0)).child(gpui::SharedString::from(t)),
-                    );
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .rounded(px(4.0))
+            .bg(colors.bg_surface)
+            .border_1()
+            .border_color(colors.border)
+            .child(
+                div()
+                    .id(gpui::SharedString::from(format!("ai-code-{msg_idx}-{block}")))
+                    .overflow_x_scroll()
+                    .font_family(crate::theme::MONO_FAMILY)
+                    .text_size(px(11.0))
+                    .child(gpui::SharedString::from(code.clone())),
+            );
+
+        if runnable {
+            let run_code = code.clone();
+            let ins_code = code;
+            card = card.child(
+                Group::new()
+                    .gap(Size::Xs)
+                    .align(Align::Center)
+                    .child(
+                        Button::new(
+                            gpui::SharedString::from(format!("ai-run-{msg_idx}-{block}")),
+                            "Run",
+                        )
+                        .size(Size::Xs)
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            cx.emit(AssistantEvent::RunSql(run_code.clone()));
+                        })),
+                    )
+                    .child(
+                        Button::new(
+                            gpui::SharedString::from(format!("ai-ins-{msg_idx}-{block}")),
+                            "Insert",
+                        )
+                        .size(Size::Xs)
+                        .variant(Variant::Subtle)
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            cx.emit(AssistantEvent::InsertSql(ins_code.clone()));
+                        })),
+                    ),
+            );
+        }
+        card.into_any_element()
+    }
+
+    /// One turn. A reply that has not opened a fence yet streams through
+    /// `AIMessage` itself; once it has, the body is built from its segments so
+    /// the SQL can carry its actions.
+    fn turn(&self, index: usize, msg: &ChatMsg, streaming_now: bool, cx: &Context<Self>) -> gpui::AnyElement {
+        if msg.role == Role::User {
+            return AIMessage::new(AIRole::User, msg.text.clone())
+                .size(Size::Sm)
+                .into_any_element();
+        }
+
+        if !has_fence(&msg.text) {
+            return AIMessage::new(AIRole::Assistant, msg.text.clone())
+                .size(Size::Sm)
+                .streaming(streaming_now)
+                .into_any_element();
+        }
+
+        let mut message = AIMessage::new(AIRole::Assistant, "").size(Size::Sm);
+        for (block, seg) in segments(&msg.text).into_iter().enumerate() {
+            message = match seg {
+                Segment::Text(text) => {
+                    message.child(Markdown::new(text).size(Size::Sm).into_any_element())
                 }
                 Segment::Code { runnable, code } => {
-                    let mut card = div()
-                        .p(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(colors.bg_surface)
-                        .border_1()
-                        .border_color(colors.border)
-                        .child(
-                            div()
-                                .id(gpui::SharedString::from(format!("ai-code-{msg_idx}-{block}")))
-                                .overflow_x_scroll()
-                                .font_family(crate::theme::MONO_FAMILY)
-                                .text_size(px(11.0))
-                                .child(gpui::SharedString::from(code.clone())),
-                        );
-                    if runnable {
-                        let run_code = code.clone();
-                        let ins_code = code;
-                        card = card.child(
-                            Group::new()
-                                .gap(Size::Xs)
-                                .child(
-                                    Button::new(
-                                        gpui::SharedString::from(format!("ai-run-{msg_idx}-{block}")),
-                                        "Run",
-                                    )
-                                    .size(Size::Xs)
-                                    .on_click(cx.listener(move |_this, _, _, cx| {
-                                        cx.emit(AssistantEvent::RunSql(run_code.clone()));
-                                    })),
-                                )
-                                .child(
-                                    Button::new(
-                                        gpui::SharedString::from(format!("ai-ins-{msg_idx}-{block}")),
-                                        "Insert",
-                                    )
-                                    .size(Size::Xs)
-                                    .variant(Variant::Subtle)
-                                    .on_click(cx.listener(move |_this, _, _, cx| {
-                                        cx.emit(AssistantEvent::InsertSql(ins_code.clone()));
-                                    })),
-                                ),
-                        );
-                    }
-                    stack = stack.child(card);
+                    message.child(self.code_block(index, block, runnable, code, cx))
                 }
-            }
+            };
         }
-        stack.into_any_element()
+        message.into_any_element()
+    }
+
+    /// The running token count and what it has cost, from the API's own
+    /// numbers and the selected model's published rates.
+    fn cost_line(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let usage = *self.usage.read(cx);
+        if usage.input == 0 && usage.output == 0 {
+            return None;
+        }
+        let model = self.app.settings.read(cx).ai_model.clone();
+        let info = ai::model_info(&model)?;
+        let spent = usage.cost(info.input_per_million, info.output_per_million);
+        Some(
+            Group::new()
+                .gap(Size::Xs)
+                .align(Align::Center)
+                .child(
+                    AITokenMeter::new(usage.input + usage.output, info.context)
+                        .size(Size::Xs)
+                        .bar(false),
+                )
+                .child(Text::new(format_cost(spent)).size(Size::Xs).dimmed())
+                .into_any_element(),
+        )
     }
 }
 
@@ -269,22 +357,30 @@ impl Render for AssistantPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         let streaming = *self.streaming.read(cx);
-        let messages = self.messages.read(cx);
+        let messages = self.messages.read(cx).clone();
         let has_key = self.app.host.has_ai_secret(&self.app.settings.read(cx).ai_auth_mode);
 
         let header = div()
             .flex()
+            .flex_none()
             .items_center()
             .justify_between()
             .px(px(8.0))
             .py(px(6.0))
             .border_b_1()
             .border_color(colors.border)
-            .child(Text::new("AI Assistant").size(Size::Xs).medium())
             .child(
                 Group::new()
                     .gap(Size::Xs)
                     .align(Align::Center)
+                    .child(Icon::new(IconName::Sparkles).size(Size::Xs))
+                    .child(Text::new("Assistant").size(Size::Xs).medium()),
+            )
+            .child(
+                Group::new()
+                    .gap(Size::Xs)
+                    .align(Align::Center)
+                    .children(self.cost_line(cx))
                     .child(
                         Button::new("ai-clear", "Clear")
                             .size(Size::Xs)
@@ -306,34 +402,16 @@ impl Render for AssistantPanel {
             let hint = if has_key {
                 "Ask me to write a query, explain a table, or debug SQL."
             } else {
-                "Add an AI key in Settings (⚙) → AI Assistant to get started."
+                "Add an AI key in Settings (⌘,) → Assistant to get started."
             };
             Center::new()
                 .child(Text::new(hint).size(Size::Xs).dimmed())
                 .into_any_element()
         } else {
+            let last = messages.len() - 1;
             let mut stack = Stack::new().gap(Size::Sm);
             for (i, msg) in messages.iter().enumerate() {
-                let is_user = msg.role == Role::User;
-                let label = if is_user {
-                    Text::new("You").size(Size::Xs).medium()
-                } else {
-                    Text::new("Assistant").size(Size::Xs).dimmed()
-                };
-                let awaiting = msg.text.is_empty() && streaming && i + 1 == messages.len();
-                let body = if awaiting {
-                    div().text_size(px(12.0)).child("▍").into_any_element()
-                } else {
-                    self.message_body(i, &msg.text, cx)
-                };
-                stack = stack.child(
-                    div()
-                        .p(px(8.0))
-                        .rounded(px(6.0))
-                        .bg(colors.bg_muted)
-                        .child(label)
-                        .child(body),
-                );
+                stack = stack.child(self.turn(i, msg, streaming && i == last, cx));
             }
             div()
                 .id("ai-messages")
@@ -345,26 +423,10 @@ impl Render for AssistantPanel {
                 .into_any_element()
         };
 
-        let composer = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .py(px(6.0))
-            .border_t_1()
-            .border_color(colors.border)
-            .child(div().flex_1().child(self.input.clone()))
-            .child(
-                Button::new("ai-send", if streaming { "…" } else { "Send" })
-                    .size(Size::Xs)
-                    .disabled(streaming)
-                    .on_click(cx.listener(|this, _, _, cx| this.send_from_input(cx))),
-            );
-
         div()
             .flex()
             .flex_col()
-            .w(px(340.0))
+            .w(px(360.0))
             .h_full()
             .flex_none()
             .border_l_1()
@@ -372,13 +434,20 @@ impl Render for AssistantPanel {
             .bg(colors.bg_surface)
             .child(header)
             .child(div().flex_1().min_h(px(0.0)).child(body))
-            .child(composer)
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .child(self.composer.clone()),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{segments, Segment};
+    use super::{has_fence, segments, Segment};
 
     fn one_code(text: &str) -> (bool, String) {
         segments(text)
@@ -419,5 +488,14 @@ mod tests {
         let segs = segments("just a sentence with no code");
         assert_eq!(segs.len(), 1);
         assert!(matches!(segs[0], Segment::Text(_)));
+    }
+
+    #[test]
+    fn fence_detection_decides_which_renderer_a_reply_gets() {
+        // No fence: the whole body streams through AIMessage, caret and all.
+        assert!(!has_fence("still writing prose"));
+        // An opening fence is enough — the block is rendered before it closes.
+        assert!(has_fence("here:\n```sql\nSELECT"));
+        assert!(has_fence("```\nplain\n```"));
     }
 }

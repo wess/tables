@@ -4,11 +4,14 @@
 //! The heavy lifting lives in the domain crates (`db`, `store`, `host`); the
 //! async DB layer is reached through the tokio bridge.
 
+mod about;
 mod bridge;
 mod home;
 mod root;
+mod settings;
 mod sheet;
 mod theme;
+mod update;
 mod workspace;
 
 // `state` holds the full cross-panel contract and `toasts` the severity
@@ -41,6 +44,14 @@ pub struct OpenPalette;
 #[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
 #[action(namespace = tables, no_json)]
 pub struct Quit;
+
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = tables, no_json)]
+pub struct ShowAbout;
+
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = tables, no_json)]
+pub struct CheckForUpdates;
 
 #[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
 #[action(namespace = tables, no_json)]
@@ -115,6 +126,9 @@ fn menus() -> Vec<Menu> {
         menu(
             "Tables",
             vec![
+                MenuItem::action("About Tables", ShowAbout),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Hide Tables", Hide),
@@ -200,6 +214,7 @@ fn main() {
         cx.on_action::<HideOthers>(|_, cx| cx.hide_other_apps());
         cx.on_action::<ShowAll>(|_, cx| cx.unhide_other_apps());
         cx.on_action::<ShowDocs>(|_, cx| cx.open_url("https://github.com/wess/tables"));
+        cx.on_action::<CheckForUpdates>(|_, cx| update::check_now(cx));
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(

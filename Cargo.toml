@@ -10,18 +10,19 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["Wess Cope <opensource@wess.io>"]
 
 [workspace.dependencies]
 # UI. Unlike Asylum (pinned to an old guise on a zed-rev gpui for libsinclair),
-# Tables has no terminal, so it uses the modern setup guise 0.10 targets:
+# Tables has no terminal, so it uses the modern setup guise 1.2 targets:
 # plain crates.io gpui with no `[patch.crates-io]` and no vendored `block`.
 gpui = "0.2.2"
-# No webview: Tables has no embedded-browser surface, so drop the wry dep.
-guise-ui = { git = "https://github.com/wess/guise", default-features = false }
+# Released guise rather than a git ref: a version a release can be rebuilt from.
+# No webview either — Tables has no embedded-browser surface, so drop the wry dep.
+guise-ui = { version = "1.2.1", default-features = false }
 
 # Async database engine. sqlx drives all three client engines (Postgres,
 # MySQL, SQLite) over one tokio runtime; the gpui app bridges to it.

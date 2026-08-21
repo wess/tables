@@ -10,4 +10,7 @@ mod anthropic;
 mod config;
 
 pub use anthropic::stream_chat;
-pub use config::{AiConfig, AuthMode, Message, Role, StreamEvent, DEFAULT_MODEL, MODELS};
+pub use config::{
+    model_info, AiConfig, AuthMode, Message, ModelInfo, Role, StreamEvent, Usage, DEFAULT_MODEL,
+    MODELS,
+};
