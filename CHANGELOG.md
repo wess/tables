@@ -2,6 +2,13 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.2.2 — 2026-08-26
+
+Built against **guise 1.5.3**. Single-line inputs, labels, picker values, table
+cells, and DevTools rows no longer clip glyph overhang, while bounded text areas
+scroll instead of hiding content. Settings can also match the sidebar to the
+content background.
+
 ## 0.2.1 — 2026-08-26
 
 Built against **guise 1.5.0**. Buttons and icon actions now join the keyboard
