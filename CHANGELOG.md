@@ -2,6 +2,15 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.2.1 — 2026-08-26
+
+Built against **guise 1.5.0**. Buttons and icon actions now join the keyboard
+tab order and activate with Enter or Space, while offscreen loaders, skeletons,
+streaming cursors, and inactive DevTools stop scheduling unnecessary frames.
+
+The dependency is pinned to the released crate so this build remains exactly
+reproducible from its lockfile.
+
 ## 0.2.0 — 2026-08-21
 
 Built against **guise 1.2.1**, up from 0.13. Most of this release is Tables
