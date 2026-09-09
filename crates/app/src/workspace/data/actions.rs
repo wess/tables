@@ -24,9 +24,14 @@ impl DataPanel {
         let deletes: Vec<PendingChange> = selection
             .iter()
             .filter_map(|idx| response.rows.get(*idx))
-            .map(|row| PendingChange::Delete { table: table.clone(), primary_key: row.clone() })
+            .map(|row| PendingChange::Delete {
+                table: table.clone(),
+                primary_key: row.clone(),
+            })
             .collect();
-        self.state.pending.update(cx, move |pending| pending.extend(deletes));
+        self.state
+            .pending
+            .update(cx, move |pending| pending.extend(deletes));
         self.state.selection.set(cx, BTreeSet::new());
     }
 
@@ -122,7 +127,7 @@ impl DataPanel {
         let count = changes.len();
         self.committing.set(cx, true);
         let host = self.app.host.clone();
-        let pending = self.state.pending.clone();
+        let table = self.state.active_table.get(cx).unwrap_or_default();
         let committing = self.committing.clone();
         let toasts = self.app.toasts.clone();
         let state = self.state.clone();
@@ -130,14 +135,19 @@ impl DataPanel {
         let writes: Vec<model::RowWrite> = changes
             .iter()
             .map(|change| match change {
-                PendingChange::Update { table, primary_key, changes } => model::RowWrite::Update {
+                PendingChange::Update {
+                    table,
+                    primary_key,
+                    changes,
+                } => model::RowWrite::Update {
                     table: table.clone(),
                     primary_key: primary_key.clone(),
                     changes: changes.clone(),
                 },
-                PendingChange::Insert { table, row } => {
-                    model::RowWrite::Insert { table: table.clone(), row: row.clone() }
-                }
+                PendingChange::Insert { table, row } => model::RowWrite::Insert {
+                    table: table.clone(),
+                    row: row.clone(),
+                },
                 PendingChange::Delete { table, primary_key } => model::RowWrite::Delete {
                     table: table.clone(),
                     primary_key: primary_key.clone(),
@@ -151,8 +161,7 @@ impl DataPanel {
                 committing.set(cx, false);
                 match result {
                     Ok(affected) => {
-                        pending.set(cx, Vec::new());
-                        state.bump_rows(cx);
+                        state.finish_commit(&table, &changes, cx);
                         if affected == 0 {
                             // The batch ran but matched no rows: don't claim success.
                             toasts.warn(
@@ -218,7 +227,10 @@ impl DataPanel {
             let Some(response) = self.state.rows.read(cx).as_ref() else {
                 return;
             };
-            selection.iter().filter_map(|i| response.rows.get(*i).cloned()).collect()
+            selection
+                .iter()
+                .filter_map(|i| response.rows.get(*i).cloned())
+                .collect()
         };
         let Some(table) = self.state.active_table.get(cx) else {
             return;
@@ -226,7 +238,11 @@ impl DataPanel {
         match self.app.host.rows_to_insert(&table, &rows) {
             Ok(sql) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
-                self.app.toasts.success(cx, &format!("{} row(s) copied as INSERT", rows.len()), 1500);
+                self.app.toasts.success(
+                    cx,
+                    &format!("{} row(s) copied as INSERT", rows.len()),
+                    1500,
+                );
             }
             Err(e) => self.app.toasts.error(cx, "Copy failed", &e),
         }
@@ -315,7 +331,8 @@ impl DataPanel {
                 bridge::run(
                     cx,
                     async move {
-                        host.export_file(&table, &format, Some(&path), &serde_json::Map::new()).await
+                        host.export_file(&table, &format, Some(&path), &serde_json::Map::new())
+                            .await
                     },
                     move |result, cx| {
                         busy.set(cx, false);

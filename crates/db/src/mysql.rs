@@ -8,6 +8,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use serde_json::{Map, Value};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::types::BigDecimal;
@@ -23,13 +24,20 @@ type Row = Map<String, Value>;
 
 pub struct MysqlAdapter {
     config: ConnectionConfig,
+    read_only: bool,
     pool: Mutex<Option<MySqlPool>>,
 }
 
 impl MysqlAdapter {
+    pub fn readonly(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
     pub fn new(config: &ConnectionConfig) -> Self {
         MysqlAdapter {
             config: config.clone(),
+            read_only: false,
             pool: Mutex::new(None),
         }
     }
@@ -64,7 +72,18 @@ impl Adapter for MysqlAdapter {
     }
 
     async fn connect(&self) -> Result<(), String> {
+        let read_only = self.read_only;
         let pool = MySqlPoolOptions::new()
+            .after_connect(move |conn, _| {
+                Box::pin(async move {
+                    if read_only {
+                        sqlx::query("SET SESSION TRANSACTION READ ONLY")
+                            .execute(conn)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            })
             .max_connections(5)
             .connect_with(self.connect_options())
             .await
@@ -82,26 +101,71 @@ impl Adapter for MysqlAdapter {
     }
 
     async fn query(&self, sql: &str) -> Result<RawResult, String> {
-        let pool = self.pool()?;
         if is_read(sql) {
-            match sqlx::query(sql).fetch_all(&pool).await {
-                Ok(rows) => {
-                    let columns = my_columns(&pool, &rows, sql).await;
-                    Ok(read_result(&rows, columns))
-                }
-                Err(e) if is_multi(&e) => simple(&pool, sql).await,
-                Err(e) => Err(err(e)),
+            return self.query_bounded(sql, 10_000, 16 * 1024 * 1024).await;
+        }
+        let pool = self.pool()?;
+        match sqlx::query(sql).execute(&pool).await {
+            Ok(done) => Ok(RawResult {
+                rows_affected: done.rows_affected(),
+                ..Default::default()
+            }),
+            Err(e) if is_multi(&e) => simple(&pool, sql).await,
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    async fn stream_rows(
+        &self,
+        sql: &str,
+        tx: tokio::sync::mpsc::Sender<model::Row>,
+    ) -> Result<(), String> {
+        let pool = self.pool()?;
+        let mut stream = sqlx::query(sql).fetch(&pool);
+        while let Some(row) = stream.try_next().await.map_err(err)? {
+            tx.send(row_to_map(&row))
+                .await
+                .map_err(|_| "Export writer stopped".to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn query_bounded(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<RawResult, String> {
+        let pool = self.pool()?;
+        let mut stream = sqlx::raw_sql(sql).fetch(&pool);
+        let mut result = RawResult::default();
+        let mut bytes = 0;
+        while let Some(row) = stream.try_next().await.map_err(err)? {
+            if result.columns.is_empty() {
+                result.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
             }
-        } else {
-            match sqlx::query(sql).execute(&pool).await {
-                Ok(done) => Ok(RawResult {
-                    rows_affected: done.rows_affected(),
-                    ..Default::default()
-                }),
-                Err(e) if is_multi(&e) => simple(&pool, sql).await,
-                Err(e) => Err(err(e)),
+            let row = row_to_map(&row);
+            bytes += serde_json::to_vec(&row).map_err(|e| e.to_string())?.len();
+            if result.rows.len() >= max_rows || bytes > max_bytes {
+                return Err(
+                    "Result exceeds the row or byte budget. Request fewer rows or smaller values."
+                        .into(),
+                );
+            }
+            result.rows.push(row);
+        }
+        drop(stream);
+        if result.columns.is_empty() {
+            if let Ok(description) = pool.describe(sql).await {
+                result.columns = description
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect();
             }
         }
+        result.rows_affected = result.rows.len() as u64;
+        Ok(result)
     }
 
     async fn exec_params(&self, sql: &str, params: &[Value]) -> Result<RawResult, String> {
@@ -114,7 +178,10 @@ impl Adapter for MysqlAdapter {
         } else {
             let q = bind_params!(sqlx::query(sql), params);
             let done = q.execute(&pool).await.map_err(err)?;
-            Ok(RawResult { rows_affected: done.rows_affected(), ..Default::default() })
+            Ok(RawResult {
+                rows_affected: done.rows_affected(),
+                ..Default::default()
+            })
         }
     }
 
@@ -168,7 +235,10 @@ ORDER BY TABLE_NAME";
         // TABLE_ROWS is an estimate and often 0 — fall back to COUNT(*).
         for table in &mut tables {
             if table.kind == "table" && table.row_count.unwrap_or(0) == 0 {
-                let sql = format!("SELECT COUNT(*) AS c FROM `{}`", table.name.replace('`', "``"));
+                let sql = format!(
+                    "SELECT COUNT(*) AS c FROM `{}`",
+                    table.name.replace('`', "``")
+                );
                 table.row_count = match fetch_maps(&pool, sqlx::query(&sql)).await {
                     Ok(rows) => rows.first().and_then(|r| int(r.get("c"))),
                     Err(_) => None,
@@ -238,7 +308,8 @@ WHERE TABLE_SCHEMA = DATABASE()
   AND TABLE_NAME = ?
   AND REFERENCED_TABLE_NAME IS NOT NULL
 GROUP BY CONSTRAINT_NAME, REFERENCED_TABLE_NAME";
-        const ACTIONS_SQL: &str = "SELECT CONSTRAINT_NAME as name, DELETE_RULE as on_delete, UPDATE_RULE as on_update
+        const ACTIONS_SQL: &str =
+            "SELECT CONSTRAINT_NAME as name, DELETE_RULE as on_delete, UPDATE_RULE as on_update
 FROM information_schema.REFERENTIAL_CONSTRAINTS
 WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = ?";
         let pool = self.pool()?;
@@ -330,7 +401,7 @@ fn is_multi(e: &sqlx::Error) -> bool {
 }
 
 fn is_read(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
+    let upper = crate::statement::head(sql).to_uppercase();
     [
         "SELECT", "WITH", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "VALUES", "TABLE", "CALL",
     ]
@@ -340,7 +411,11 @@ fn is_read(sql: &str) -> bool {
 
 async fn my_columns(pool: &MySqlPool, rows: &[MySqlRow], sql: &str) -> Vec<String> {
     if let Some(first) = rows.first() {
-        return first.columns().iter().map(|c| c.name().to_string()).collect();
+        return first
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
     }
     match pool.describe(sql).await {
         Ok(d) => d.columns().iter().map(|c| c.name().to_string()).collect(),
@@ -394,7 +469,9 @@ fn my_value(row: &MySqlRow, i: usize) -> Value {
     }
     let ty = raw.type_info().name().to_uppercase();
     if ty.contains("DECIMAL") {
-        row.try_get::<BigDecimal, _>(i).map(numeric_json).unwrap_or(Value::Null)
+        row.try_get::<BigDecimal, _>(i)
+            .map(numeric_json)
+            .unwrap_or(Value::Null)
     } else if ty.contains("DATETIME") || ty.contains("TIMESTAMP") {
         row.try_get::<chrono::NaiveDateTime, _>(i)
             .map(|t| Value::String(t.format("%Y-%m-%d %H:%M:%S").to_string()))
@@ -408,16 +485,22 @@ fn my_value(row: &MySqlRow, i: usize) -> Value {
             .map(|t| Value::String(t.format("%H:%M:%S").to_string()))
             .unwrap_or(Value::Null)
     } else if ty == "YEAR" {
-        row.try_get::<i64, _>(i).map(Value::from).unwrap_or(Value::Null)
+        row.try_get::<i64, _>(i)
+            .map(Value::from)
+            .unwrap_or(Value::Null)
     } else if ty.contains("INT") {
         row.try_get::<i64, _>(i)
             .map(Value::from)
             .or_else(|_| row.try_get::<u64, _>(i).map(Value::from))
             .unwrap_or(Value::Null)
     } else if ty.contains("DOUBLE") || ty.contains("REAL") {
-        row.try_get::<f64, _>(i).map(json_f64).unwrap_or(Value::Null)
+        row.try_get::<f64, _>(i)
+            .map(json_f64)
+            .unwrap_or(Value::Null)
     } else if ty.contains("FLOAT") {
-        row.try_get::<f32, _>(i).map(|f| json_f64(f as f64)).unwrap_or(Value::Null)
+        row.try_get::<f32, _>(i)
+            .map(|f| json_f64(f as f64))
+            .unwrap_or(Value::Null)
     } else if ty == "JSON" {
         row.try_get::<Value, _>(i).unwrap_or(Value::Null)
     } else if ty.contains("BLOB") || ty.contains("BINARY") || ty == "BIT" {
@@ -436,7 +519,9 @@ fn my_value(row: &MySqlRow, i: usize) -> Value {
 }
 
 fn json_f64(f: f64) -> Value {
-    serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
+    serde_json::Number::from_f64(f)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 fn numeric_json(d: BigDecimal) -> Value {

@@ -63,12 +63,18 @@ impl Root {
             toasts: Toasts::new(cx),
         };
         provide(cx, state.clone());
-        watch(cx, &state.route);
+        cx.observe(state.route.entity(), |this, _, cx| {
+            if this.state.route.get(cx) == Route::Home {
+                if let Some((_, workspace)) = &this.workspace {
+                    workspace.update(cx, |workspace, cx| workspace.pause(cx));
+                }
+            }
+            cx.notify();
+        })
+        .detach();
 
         // Only the check is automatic; installing is always an explicit click.
-        if settings_auto_update {
-            crate::update::start(cx);
-        }
+        crate::update::configure(settings_auto_update, cx);
 
         let toast_stack = state.toasts.stack();
         let home = cx.new(Home::new);
@@ -132,10 +138,25 @@ impl Render for Root {
 
         match self.state.route.get(cx) {
             Route::Home => {
-                root = root.child(self.home.clone());
+                root = root.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .child(
+                            crate::titlebar::bar("Tables".into(), cx)
+                                .child(crate::titlebar::update_button(cx))
+                                .child(crate::titlebar::settings_button()),
+                        )
+                        .child(div().flex_1().min_h(gpui::px(0.0)).child(self.home.clone())),
+                );
             }
             Route::Workspace(id) => {
-                let stale = self.workspace.as_ref().map(|(wid, _)| wid != &id).unwrap_or(true);
+                let stale = self
+                    .workspace
+                    .as_ref()
+                    .map(|(wid, _)| wid != &id)
+                    .unwrap_or(true);
                 if stale {
                     // Replacing the cached workspace: disconnect the one we're
                     // dropping so its health monitor and pooled connection don't
@@ -143,7 +164,11 @@ impl Render for Root {
                     if let Some((old_id, _)) = self.workspace.take() {
                         if old_id != id {
                             let host = self.state.host.clone();
-                            bridge::run(cx, async move { host.disconnect(&old_id).await }, |_, _| {});
+                            bridge::run(
+                                cx,
+                                async move { host.disconnect(&old_id).await },
+                                |_, _| {},
+                            );
                         }
                     }
                     let for_view = id.clone();

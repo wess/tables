@@ -9,163 +9,141 @@ use super::DataPanel;
 use crate::state::PendingChange;
 use crate::workspace::review::generate_sql;
 
-/// A toolbar separator.
-///
-/// Not `Divider::vertical()`, which is `h_full` — a percentage height against a
-/// `Group`, whose height is derived from its own wrapped content. That circular
-/// case resolves degenerately and throws the toolbar's second row out of its
-/// container and on top of the grid. An explicit height has no such problem.
-fn separator(color: Hsla) -> impl IntoElement {
-    div().w(px(1.0)).h(px(16.0)).flex_none().bg(color)
-}
-
 impl DataPanel {
     pub(super) fn toolbar(&self, cx: &mut Context<Self>, border: Hsla) -> impl IntoElement {
-        let has_selection = !self.state.selection.read(cx).is_empty();
-        let pending = self.state.pending.read(cx).len();
-        let busy = *self.busy.read(cx);
-
-        let mut actions = Group::new()
-            .gap(Size::Xs)
-            .align(Align::Center)
-            .child(
-                Button::new("data-refresh", "Refresh")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .on_click(cx.listener(|this, _, _, cx| this.state.bump_rows(cx))),
-            )
-            .child(
-                Button::new("data-insert", "Insert")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .on_click(cx.listener(|this, _, _, cx| this.open_insert(cx))),
-            )
-            .child(
-                Button::new("data-delete", "Delete")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .color(ColorName::Red)
-                    .disabled(!has_selection)
-                    .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
-            )
-            .child(
-                Button::new("data-mock", if busy { "Generating…" } else { "Generate" })
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .disabled(busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.generate_data(cx))),
-            )
-            .child(separator(border))
-            .child(
-                Button::new("data-filter", "Filter")
-                    .size(Size::Xs)
-                    .variant(if self.state.filter_panel_open.read(cx).to_owned() {
-                        Variant::Light
-                    } else {
-                        Variant::Subtle
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.state.filter_panel_open.update(cx, |open| *open = !*open);
-                    })),
-            )
-            .child(
-                Button::new("data-inspect", "Inspect")
-                    .size(Size::Xs)
-                    .variant(if self.state.inspector_open.read(cx).to_owned() {
-                        Variant::Light
-                    } else {
-                        Variant::Subtle
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.state.inspector_open.update(cx, |open| *open = !*open);
-                    })),
-            )
-            .child(
-                Button::new("data-copy", "Copy")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .disabled(!has_selection)
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_selection(cx))),
-            )
-            .child(
-                Button::new("data-copy-insert", "Copy INSERT")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .disabled(!has_selection)
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_as_insert(cx))),
-            )
-            .child(separator(border))
-            .child(
-                Button::new("data-import", "Import")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .disabled(busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.import_csv(cx))),
-            )
-            .child(
-                Button::new("data-export", "Export")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .disabled(busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.export_table(cx))),
-            );
-
-        // A single spinner for any in-flight work: toolbar actions (busy) or a
-        // row fetch (table select / refresh / page / sort / filter).
-        let loading = *self.state.rows_loading.read(cx);
-        if busy || loading {
-            let label = if busy { "Working…" } else { "Loading…" };
-            actions = actions.child(
-                Group::new()
-                    .gap(Size::Xs)
-                    .align(Align::Center)
-                    .child(Loader::new().size(Size::Xs))
-                    .child(Text::new(label).size(Size::Xs).dimmed()),
-            );
-        }
-
-        if pending > 0 {
-            actions = actions
-                .child(separator(border))
-                .child(
-                    Badge::new(format!("{pending} pending"))
-                        .variant(Variant::Light)
-                        .color(ColorName::Orange)
-                        .size(Size::Sm),
-                )
-                .child(
-                    Button::new("data-review", "Review")
-                        .size(Size::Xs)
-                        .variant(Variant::Light)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_review = true;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("data-discard", "Discard")
-                        .size(Size::Xs)
-                        .variant(Variant::Subtle)
-                        .color(ColorName::Red)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.confirm_discard = true;
-                            cx.notify();
-                        })),
-                );
-        }
-
-        // `flex_none`, because a `Group` wraps by default: in a flex column a
-        // shrinkable bar is squeezed under its wrapped height and the second
-        // row of buttons lands on top of the grid.
+        let loading = self.busy.get(cx) || self.state.rows_loading.get(cx);
+        let locked = loading || self.committing.get(cx);
+        let selected = !self.state.selection.read(cx).is_empty();
+        let has_table = self.state.active_table.read(cx).is_some();
         div()
             .flex()
             .flex_none()
             .items_center()
+            .h(px(40.0))
             .px(px(8.0))
-            .py(px(6.0))
+            .gap(px(4.0))
+            .bg(crate::theme::palette(cx).bg_subtle)
             .border_b_1()
             .border_color(border)
-            .child(actions)
+            .child(
+                ActionIcon::new("data-refresh", IconName::RefreshCw)
+                    .size(Size::Sm)
+                    .label("Refresh rows")
+                    .disabled(loading)
+                    .on_click(cx.listener(|this, _, _, cx| this.state.bump_rows(cx))),
+            )
+            .child(
+                ActionIcon::new("data-insert", IconName::Plus)
+                    .size(Size::Sm)
+                    .label("Insert row")
+                    .disabled(locked || !has_table)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_insert(cx))),
+            )
+            .child(div().w(px(1.0)).h(px(18.0)).mx(px(4.0)).bg(border))
+            .child(
+                ActionIcon::new("data-filter", IconName::ListFilter)
+                    .size(Size::Sm)
+                    .label("Filters")
+                    .variant(if self.state.filter_panel_open.get(cx) {
+                        Variant::Light
+                    } else {
+                        Variant::Subtle
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.filter_panel_open.update(cx, |o| *o = !*o)
+                    })),
+            )
+            .child(
+                ActionIcon::new("data-inspect", IconName::PanelRight)
+                    .size(Size::Sm)
+                    .label("Inspect selected row")
+                    .variant(if self.state.inspector_open.get(cx) {
+                        Variant::Light
+                    } else {
+                        Variant::Subtle
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.inspector_open.update(cx, |o| *o = !*o)
+                    })),
+            )
+            .child(
+                ActionIcon::new("data-copy", IconName::Copy)
+                    .size(Size::Sm)
+                    .label("Copy selected rows…")
+                    .disabled(locked || !selected)
+                    .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                        this.open_copy(event.position(), window, cx);
+                    })),
+            )
+            .child(
+                ActionIcon::new("data-delete", IconName::Trash2)
+                    .size(Size::Sm)
+                    .label("Stage deletion of selected rows")
+                    .disabled(locked || !selected)
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_selected(cx))),
+            )
+            .child(div().w(px(1.0)).h(px(18.0)).mx(px(4.0)).bg(border))
+            .child(
+                ActionIcon::new("data-import", IconName::Upload)
+                    .size(Size::Sm)
+                    .label("Import CSV…")
+                    .disabled(locked || !has_table)
+                    .on_click(cx.listener(|this, _, _, cx| this.import_csv(cx))),
+            )
+            .child(
+                ActionIcon::new("data-export", IconName::Download)
+                    .size(Size::Sm)
+                    .label("Export table…")
+                    .disabled(locked || !has_table)
+                    .on_click(cx.listener(|this, _, _, cx| this.export_table(cx))),
+            )
+            .child(
+                ActionIcon::new("data-generate", IconName::WandSparkles)
+                    .size(Size::Sm)
+                    .label("Generate 50 sample rows")
+                    .disabled(locked || !has_table)
+                    .on_click(cx.listener(|this, _, _, cx| this.generate_data(cx))),
+            )
+            .child(div().flex_1())
+            .when(loading, |d| d.child(Loader::new().size(Size::Xs)))
+            .child(super::super::views::selector(&self.state, cx))
+    }
+
+    pub(super) fn pending_bar(&self, cx: &mut Context<Self>, count: usize) -> impl IntoElement {
+        let colors = crate::theme::palette(cx);
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(42.0))
+            .px(px(12.0))
+            .gap(px(12.0))
+            .bg(colors.bg_surface)
+            .border_t_1()
+            .border_color(colors.border)
+            .child(Icon::new(IconName::Pencil).size(Size::Xs))
+            .child(Text::new(format!("{count} uncommitted change(s)")).size(Size::Xs))
+            .child(div().flex_1())
+            .child(
+                Button::new("data-discard", "Discard")
+                    .size(Size::Xs)
+                    .color(ColorName::Gray)
+                    .variant(Variant::Subtle)
+                    .disabled(self.committing.get(cx))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_discard = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("data-review", "Review changes")
+                    .size(Size::Xs)
+                    .disabled(self.committing.get(cx))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_review = true;
+                        cx.notify();
+                    })),
+            )
     }
 
     pub(super) fn review_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -173,9 +151,18 @@ impl DataPanel {
         let changes = self.state.pending.read(cx);
         let committing = *self.committing.read(cx);
         let count = changes.len();
-        let updates = changes.iter().filter(|c| matches!(c, PendingChange::Update { .. })).count();
-        let inserts = changes.iter().filter(|c| matches!(c, PendingChange::Insert { .. })).count();
-        let deletes = changes.iter().filter(|c| matches!(c, PendingChange::Delete { .. })).count();
+        let updates = changes
+            .iter()
+            .filter(|c| matches!(c, PendingChange::Update { .. }))
+            .count();
+        let inserts = changes
+            .iter()
+            .filter(|c| matches!(c, PendingChange::Insert { .. }))
+            .count();
+        let deletes = changes
+            .iter()
+            .filter(|c| matches!(c, PendingChange::Delete { .. }))
+            .count();
 
         let mut list = Stack::new().gap(Size::Xs);
         for change in changes {
@@ -208,9 +195,21 @@ impl DataPanel {
             .child(
                 Group::new()
                     .gap(Size::Xs)
-                    .child(Badge::new(format!("{updates} updates")).variant(Variant::Light).color(ColorName::Blue))
-                    .child(Badge::new(format!("{inserts} inserts")).variant(Variant::Light).color(ColorName::Teal))
-                    .child(Badge::new(format!("{deletes} deletes")).variant(Variant::Light).color(ColorName::Red)),
+                    .child(
+                        Badge::new(format!("{updates} updates"))
+                            .variant(Variant::Light)
+                            .color(ColorName::Blue),
+                    )
+                    .child(
+                        Badge::new(format!("{inserts} inserts"))
+                            .variant(Variant::Light)
+                            .color(ColorName::Teal),
+                    )
+                    .child(
+                        Badge::new(format!("{deletes} deletes"))
+                            .variant(Variant::Light)
+                            .color(ColorName::Red),
+                    ),
             )
             .child(
                 div()
@@ -287,12 +286,16 @@ impl DataPanel {
                                         )
                                         .variant(Variant::Subtle)
                                         .size(Size::Xs)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                                copy_value.clone(),
-                                            ));
-                                            this.app.toasts.success(cx, "Copied", 1000);
-                                        })),
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(
+                                                        copy_value.clone(),
+                                                    ),
+                                                );
+                                                this.app.toasts.success(cx, "Copied", 1000);
+                                            }),
+                                        ),
                                     ),
                             )
                             .child(
@@ -305,7 +308,10 @@ impl DataPanel {
                 }
                 list.into_any_element()
             }
-            _ => Text::new("Select a row to inspect").size(Size::Xs).dimmed().into_any_element(),
+            _ => Text::new("Select a row to inspect")
+                .size(Size::Xs)
+                .dimmed()
+                .into_any_element(),
         };
 
         div()

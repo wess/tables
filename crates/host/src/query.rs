@@ -18,6 +18,7 @@ impl Host {
     /// return the result. A failed statement is an `Ok` `QueryResult` carrying
     /// `error`; only a missing connection is an `Err`.
     pub async fn execute_query(&self, sql: &str) -> Result<QueryResult, String> {
+        self.confirm_write(sql).await?;
         let id = self
             .active_connection_id()
             .ok_or_else(|| "No active connection".to_string())?;
@@ -45,6 +46,7 @@ impl Host {
     /// Split on statement boundaries, run in order, stopping at the first
     /// failure. Each result carries its own `sql`.
     pub async fn execute_multi(&self, sql: &str) -> Result<Vec<QueryResult>, String> {
+        self.confirm_write(sql).await?;
         let id = self
             .active_connection_id()
             .ok_or_else(|| "No active connection".to_string())?;
@@ -80,9 +82,12 @@ impl Host {
     /// batch rolls back. Returns the total rows affected. Result sets are not
     /// returned — this is for write batches (DDL/DML).
     pub async fn execute_transaction(&self, sql: &str) -> Result<u64, String> {
+        self.confirm_write(sql).await?;
         let adapter = self.active_adapter()?;
-        let statements: Vec<String> =
-            split_statements(sql).into_iter().filter(|s| !s.trim().is_empty()).collect();
+        let statements: Vec<String> = split_statements(sql)
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
         if statements.is_empty() {
             return Ok(0);
         }
@@ -101,7 +106,9 @@ impl Host {
             _ => "EXPLAIN ",
         };
         let start = Instant::now();
-        let raw = adapter.query(&format!("{prefix}{}", sql.trim().trim_end_matches(';'))).await?;
+        let raw = adapter
+            .query(&format!("{prefix}{}", sql.trim().trim_end_matches(';')))
+            .await?;
         Ok(QueryResult::from_raw(raw, elapsed_ms(start)))
     }
 

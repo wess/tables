@@ -24,14 +24,29 @@ fn column_def(d: Dialect, name: &str, ty: &str, nullable: bool, default: Option<
 fn ddl_create_table(d: Dialect, table: &str, cols: &[NewColumn]) -> String {
     let mut defs: Vec<String> = cols
         .iter()
-        .map(|c| column_def(d, &c.name, &c.data_type, c.nullable, c.default_value.as_deref()))
+        .map(|c| {
+            column_def(
+                d,
+                &c.name,
+                &c.data_type,
+                c.nullable,
+                c.default_value.as_deref(),
+            )
+        })
         .collect();
-    let pk: Vec<String> =
-        cols.iter().filter(|c| c.primary_key).map(|c| d.quote_ident(&c.name)).collect();
+    let pk: Vec<String> = cols
+        .iter()
+        .filter(|c| c.primary_key)
+        .map(|c| d.quote_ident(&c.name))
+        .collect();
     if !pk.is_empty() {
         defs.push(format!("PRIMARY KEY ({})", pk.join(", ")));
     }
-    format!("CREATE TABLE {} (\n  {}\n)", d.quote_ident(table), defs.join(",\n  "))
+    format!(
+        "CREATE TABLE {} (\n  {}\n)",
+        d.quote_ident(table),
+        defs.join(",\n  ")
+    )
 }
 
 fn ddl_add_column(
@@ -50,7 +65,11 @@ fn ddl_add_column(
 }
 
 fn ddl_drop_column(d: Dialect, table: &str, column: &str) -> String {
-    format!("ALTER TABLE {} DROP COLUMN {}", d.quote_ident(table), d.quote_ident(column))
+    format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        d.quote_ident(table),
+        d.quote_ident(column)
+    )
 }
 
 fn ddl_rename_column(d: Dialect, table: &str, old: &str, new: &str) -> String {
@@ -62,8 +81,18 @@ fn ddl_rename_column(d: Dialect, table: &str, old: &str, new: &str) -> String {
     )
 }
 
-fn ddl_create_index(d: Dialect, table: &str, name: &str, columns: &[String], unique: bool) -> String {
-    let cols = columns.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
+fn ddl_create_index(
+    d: Dialect,
+    table: &str,
+    name: &str,
+    columns: &[String],
+    unique: bool,
+) -> String {
+    let cols = columns
+        .iter()
+        .map(|c| d.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
     let unique = if unique { "UNIQUE " } else { "" };
     format!(
         "CREATE {unique}INDEX {} ON {} ({cols})",
@@ -76,7 +105,11 @@ fn ddl_create_index(d: Dialect, table: &str, name: &str, columns: &[String], uni
 fn ddl_drop_index(d: Dialect, table: &str, name: &str) -> String {
     match d {
         Dialect::Mysql => {
-            format!("DROP INDEX {} ON {}", d.quote_ident(name), d.quote_ident(table))
+            format!(
+                "DROP INDEX {} ON {}",
+                d.quote_ident(name),
+                d.quote_ident(table)
+            )
         }
         _ => format!("DROP INDEX {}", d.quote_ident(name)),
     }
@@ -90,6 +123,7 @@ impl Host {
     /// Run a DDL statement on the active connection, then drop cached column
     /// types (the schema just changed).
     async fn run_ddl(&self, sql: &str) -> Result<(), String> {
+        self.confirm_write(sql).await?;
         let adapter = self.active_adapter()?;
         adapter.query(sql).await?;
         self.invalidate_schema_cache();
@@ -116,7 +150,10 @@ impl Host {
         default: Option<&str>,
     ) -> Result<(), String> {
         let d = self.active_adapter()?.dialect();
-        self.run_ddl(&ddl_add_column(d, table, name, data_type, nullable, default)).await
+        self.run_ddl(&ddl_add_column(
+            d, table, name, data_type, nullable, default,
+        ))
+        .await
     }
 
     pub async fn drop_column(&self, table: &str, column: &str) -> Result<(), String> {
@@ -137,7 +174,8 @@ impl Host {
         unique: bool,
     ) -> Result<(), String> {
         let d = self.active_adapter()?.dialect();
-        self.run_ddl(&ddl_create_index(d, table, name, columns, unique)).await
+        self.run_ddl(&ddl_create_index(d, table, name, columns, unique))
+            .await
     }
 
     pub async fn drop_index(&self, table: &str, name: &str) -> Result<(), String> {
@@ -167,7 +205,10 @@ mod tests {
 
     #[test]
     fn create_table_with_primary_key() {
-        let cols = vec![col("id", "INTEGER", false, true), col("name", "TEXT", true, false)];
+        let cols = vec![
+            col("id", "INTEGER", false, true),
+            col("name", "TEXT", true, false),
+        ];
         let sql = ddl_create_table(Dialect::Sqlite, "users", &cols);
         assert_eq!(
             sql,
@@ -178,7 +219,10 @@ mod tests {
     #[test]
     fn add_column_carries_nullability_and_default() {
         let sql = ddl_add_column(Dialect::Postgres, "t", "age", "integer", false, Some("0"));
-        assert_eq!(sql, "ALTER TABLE \"t\" ADD COLUMN \"age\" integer NOT NULL DEFAULT 0");
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"t\" ADD COLUMN \"age\" integer NOT NULL DEFAULT 0"
+        );
     }
 
     #[test]
@@ -201,8 +245,17 @@ mod tests {
 
     #[test]
     fn drop_index_is_table_scoped_only_on_mysql() {
-        assert_eq!(ddl_drop_index(Dialect::Postgres, "t", "idx"), "DROP INDEX \"idx\"");
-        assert_eq!(ddl_drop_index(Dialect::Sqlite, "t", "idx"), "DROP INDEX \"idx\"");
-        assert_eq!(ddl_drop_index(Dialect::Mysql, "t", "idx"), "DROP INDEX `idx` ON `t`");
+        assert_eq!(
+            ddl_drop_index(Dialect::Postgres, "t", "idx"),
+            "DROP INDEX \"idx\""
+        );
+        assert_eq!(
+            ddl_drop_index(Dialect::Sqlite, "t", "idx"),
+            "DROP INDEX \"idx\""
+        );
+        assert_eq!(
+            ddl_drop_index(Dialect::Mysql, "t", "idx"),
+            "DROP INDEX `idx` ON `t`"
+        );
     }
 }

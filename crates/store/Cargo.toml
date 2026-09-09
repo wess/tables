@@ -11,6 +11,13 @@ model = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-# Secret storage. `apple-native` uses the macOS Keychain; a backend error
-# degrades gracefully (the caller keeps the password in JSON).
+tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

@@ -86,7 +86,11 @@ impl SettingsModal {
         let base = app.settings.get(cx);
 
         let theme_idx = Signal::new(cx, theme_index(&base.theme));
-        let theme = cx.new(|cx| Select::new(cx).data(["Light", "Dark", "Auto"]).size(Size::Sm));
+        let theme = cx.new(|cx| {
+            Select::new(cx)
+                .data(["Light", "Dark", "Auto"])
+                .size(Size::Sm)
+        });
         Select::bind(&theme, &theme_idx, cx);
 
         let row_height_idx = Signal::new(cx, row_height_index(&base.grid_row_height));
@@ -118,7 +122,10 @@ impl SettingsModal {
             move |cx| TextInput::new(cx).value(&v).size(Size::Sm)
         });
 
-        let model_index = ai::MODELS.iter().position(|m| m.id == base.ai_model).unwrap_or(0);
+        let model_index = ai::MODELS
+            .iter()
+            .position(|m| m.id == base.ai_model)
+            .unwrap_or(0);
         let ai_model_idx = Signal::new(cx, model_index);
         let ai_model = cx.new(|cx| {
             let labels: Vec<String> = ai::MODELS.iter().map(|m| m.label.to_string()).collect();
@@ -126,8 +133,7 @@ impl SettingsModal {
         });
         Select::bind(&ai_model, &ai_model_idx, cx);
 
-        let ai_auth_idx =
-            Signal::new(cx, usize::from(base.ai_auth_mode == "subscription"));
+        let ai_auth_idx = Signal::new(cx, usize::from(base.ai_auth_mode == "subscription"));
         let ai_auth = cx.new(|cx| {
             Select::new(cx)
                 .data(["API Key", "Claude Subscription"])
@@ -233,7 +239,12 @@ impl SettingsModal {
             editor_word_wrap: self.word_wrap,
             editor_line_numbers: self.line_numbers,
             grid_row_height,
-            grid_page_size: (self.controls.page_size.read(cx).value_f64().unwrap_or(100.0) as u64)
+            grid_page_size: (self
+                .controls
+                .page_size
+                .read(cx)
+                .value_f64()
+                .unwrap_or(100.0) as u64)
                 .max(1),
             grid_show_row_numbers: self.show_row_numbers,
             grid_alternate_rows: self.alternate_rows,
@@ -248,10 +259,10 @@ impl SettingsModal {
         if let Ok(value) = serde_json::to_value(&new) {
             self.app.host.save_settings(&value);
         }
+        crate::update::configure(new.auto_update, cx);
         self.app.settings.set(cx, new);
 
-        // Re-apply the theme (auto falls back to dark for now).
-        let scheme = if theme == "light" { ColorScheme::Light } else { ColorScheme::Dark };
+        let scheme = crate::theme::scheme(&theme, cx);
         crate::theme::build(scheme).init(cx);
         cx.refresh_windows();
 

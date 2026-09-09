@@ -40,7 +40,10 @@ pub struct HealthMonitor {
 impl HealthMonitor {
     /// Start probing `id`. Must be called from within the tokio runtime.
     pub fn start(&self, id: String, registry: Arc<Registry>) {
-        self.stop(&id);
+        let mut watches = self.watches.lock().unwrap();
+        if let Some(watch) = watches.remove(&id) {
+            watch.handle.abort();
+        }
         // Unknown until the first probe completes — never claim healthy without
         // evidence.
         let status = Arc::new(Mutex::new(Health::Unknown));
@@ -59,10 +62,7 @@ impl HealthMonitor {
             }
         })
         .abort_handle();
-        self.watches
-            .lock()
-            .unwrap()
-            .insert(id, Watch { status, handle });
+        watches.insert(id, Watch { status, handle });
     }
 
     /// Stops the probe task AND drops the status entry.
@@ -80,6 +80,14 @@ impl HealthMonitor {
             .get(id)
             .map(|watch| *watch.status.lock().unwrap())
             .unwrap_or(Health::Disconnected)
+    }
+}
+
+impl Drop for HealthMonitor {
+    fn drop(&mut self) {
+        for (_, watch) in self.watches.get_mut().unwrap().drain() {
+            watch.handle.abort();
+        }
     }
 }
 

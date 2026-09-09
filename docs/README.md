@@ -14,6 +14,10 @@ Tables is a native desktop client for PostgreSQL, MySQL, MariaDB, and SQLite. It
 - [Troubleshooting](guides/troubleshooting.md) — common connection, query, and display problems.
 - [Architecture](guides/architecture.md) — workspace boundaries, async runtime, persistence, and extension points.
 - [Development](guides/development.md) — build, test, lint, and contribution conventions.
+- [MCP server](mcp.md) — connect a client to saved databases through read-only stdio tools.
+- [Assistant and updates](guides/assistant.md) — configure credentials, schema context, and automatic checks.
+- [Stability report](stability.md) — current safeguards, validation, and remaining limits.
+- [Release process](release.md) — platform builds, packaging, and publication.
 - [Project review](review.md) — stability, performance, and usability findings from the July 2026 audit.
 
 ## Supported databases
@@ -27,4 +31,4 @@ Tables is a native desktop client for PostgreSQL, MySQL, MariaDB, and SQLite. It
 
 ## Documentation conventions
 
-Keyboard shortcuts use macOS symbols because the current native application targets macOS. SQL examples are intentionally small and should be adapted to the selected database engine. Actions that modify data are called out explicitly.
+Keyboard shortcuts use macOS symbols for macOS; Linux packages and beta Windows builds are also available. SQL examples are intentionally small and should be adapted to the selected database engine. Actions that modify data are called out explicitly.

@@ -25,6 +25,7 @@ priority = "optional"
 extended-description = "A fast, modern database client for Postgres, MySQL, and SQLite, built with gpui and guise."
 assets = [
     ["target/release/tablesdev", "usr/bin/tables", "755"],
+    ["target/release/tablesmcp", "usr/bin/tablesmcp", "755"],
     ["../../assets/tables.desktop", "usr/share/applications/tables.desktop", "644"],
     ["../../assets/icon512.png", "usr/share/pixmaps/tables.png", "644"],
 ]

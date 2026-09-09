@@ -13,8 +13,8 @@ The **Test** action makes a temporary connection and reports its database versio
 ## Safe modes
 
 - **Default** permits reads and writes.
-- **Confirm** is intended for workflows that should ask before potentially destructive actions.
-- **Read only** is intended for production or audit access where writes should not occur.
+- **Confirm** asks for approval before writes through the app.
+- **Read only** opens a read-only database session and blocks application writes.
 
 Treat safe modes as an application guardrail, not a database security boundary. A database account with read-only permissions remains the strongest protection for production data.
 

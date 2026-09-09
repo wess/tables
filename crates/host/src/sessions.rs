@@ -57,7 +57,11 @@ impl Host {
                         state: {
                             let cmd = cell(r, "Command");
                             let st = cell(r, "State");
-                            if st.is_empty() { cmd } else { format!("{cmd} · {st}") }
+                            if st.is_empty() {
+                                cmd
+                            } else {
+                                format!("{cmd} · {st}")
+                            }
                         },
                         query: cell(r, "Info"),
                         duration: format!("{}s", cell(r, "Time")),
@@ -71,11 +75,18 @@ impl Host {
     /// Kill a session by its numeric id. The id is parsed as an integer first so
     /// it can never carry injected SQL.
     pub async fn kill_session(&self, id: &str) -> Result<(), String> {
-        let pid: i64 = id.trim().parse().map_err(|_| "Invalid session id".to_string())?;
+        self.confirm_write(&format!("Terminate session {id}"))
+            .await?;
+        let pid: i64 = id
+            .trim()
+            .parse()
+            .map_err(|_| "Invalid session id".to_string())?;
         let adapter = self.active_adapter()?;
         match adapter.dialect() {
             Dialect::Postgres => {
-                adapter.query(&format!("SELECT pg_terminate_backend({pid})")).await?;
+                adapter
+                    .query(&format!("SELECT pg_terminate_backend({pid})"))
+                    .await?;
             }
             Dialect::Mysql => {
                 adapter.query(&format!("KILL {pid}")).await?;

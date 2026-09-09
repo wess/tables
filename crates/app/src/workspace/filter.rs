@@ -47,7 +47,13 @@ impl FilterPanel {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
         watch(cx, &state.active_table);
         watch(cx, &state.rows);
-        FilterPanel { app, state, rows: Vec::new(), logic_or: false, built_table: None }
+        FilterPanel {
+            app,
+            state,
+            rows: Vec::new(),
+            logic_or: false,
+            built_table: None,
+        }
     }
 
     fn columns(&self, cx: &gpui::App) -> Vec<String> {
@@ -62,9 +68,9 @@ impl FilterPanel {
     /// Rebuild the draft rows from the applied filters when the table changes.
     fn ensure_synced(&mut self, cx: &mut Context<Self>) {
         let table = self.state.active_table.get(cx);
-        if self.built_table != table {
+        if self.built_table != table && self.state.rows.read(cx).is_some() {
             self.built_table = table;
-            let applied = self.state.applied_filters.get(cx);
+            let applied = self.state.draft_filters.get(cx);
             self.logic_or = applied.logic == "or";
             let seeds = applied.conditions.clone();
             self.rows = seeds.iter().map(|c| self.make_row(Some(c), cx)).collect();
@@ -82,24 +88,59 @@ impl FilterPanel {
         let op_labels: Vec<&str> = OPS.iter().map(|(l, _)| *l).collect();
         let value_text = seed.map(|s| s.value.clone()).unwrap_or_default();
 
-        let column = cx.new(move |cx| Select::new(cx).data(columns).selected(col_idx).size(Size::Xs));
-        let operator = cx.new(move |cx| Select::new(cx).data(op_labels).selected(op_idx).size(Size::Xs));
-        let value = cx.new(move |cx| TextInput::new(cx).value(&value_text).placeholder("value").size(Size::Xs));
-        FilterRow { id: model::new_uuid(), column, operator, value }
+        let column = cx.new(move |cx| {
+            Select::new(cx)
+                .data(columns)
+                .selected(col_idx)
+                .size(Size::Xs)
+        });
+        let operator = cx.new(move |cx| {
+            Select::new(cx)
+                .data(op_labels)
+                .selected(op_idx)
+                .size(Size::Xs)
+        });
+        let value = cx.new(move |cx| {
+            TextInput::new(cx)
+                .value(&value_text)
+                .placeholder("value")
+                .size(Size::Xs)
+        });
+        cx.subscribe(&column, |this, _, _: &SelectEvent, cx| this.save_draft(cx))
+            .detach();
+        cx.subscribe(&operator, |this, _, _: &SelectEvent, cx| {
+            this.save_draft(cx)
+        })
+        .detach();
+        cx.subscribe(&value, |this, _, _: &TextInputEvent, cx| {
+            this.save_draft(cx)
+        })
+        .detach();
+        FilterRow {
+            id: seed.map(|s| s.id.clone()).unwrap_or_else(model::new_uuid),
+            column,
+            operator,
+            value,
+        }
     }
 
     fn add_row(&mut self, cx: &mut Context<Self>) {
         let row = self.make_row(None, cx);
         self.rows.push(row);
+        self.save_draft(cx);
         cx.notify();
     }
 
     fn remove_row(&mut self, id: &str, cx: &mut Context<Self>) {
         self.rows.retain(|r| r.id != id);
+        self.save_draft(cx);
         cx.notify();
     }
 
-    fn apply(&self, cx: &mut gpui::App) {
+    fn save_draft(&self, cx: &mut gpui::App) {
+        if self.built_table != self.state.active_table.get(cx) {
+            return;
+        }
         let columns = self.columns(cx);
         let conditions: Vec<FilterCondition> = self
             .rows
@@ -113,17 +154,33 @@ impl FilterPanel {
                 let op_idx = row.operator.read(cx).selected_index().unwrap_or(0);
                 let operator = OPS[op_idx].1.to_string();
                 let value = row.value.read(cx).text();
-                Some(FilterCondition { id: row.id.clone(), column, operator, value, value2: None })
+                Some(FilterCondition {
+                    id: row.id.clone(),
+                    column,
+                    operator,
+                    value,
+                    value2: None,
+                })
             })
             .collect();
         let logic = if self.logic_or { "or" } else { "and" }.to_string();
-        self.state.applied_filters.set(cx, FilterState { conditions, logic });
+        self.state
+            .draft_filters
+            .set(cx, FilterState { conditions, logic });
+    }
+
+    fn apply(&self, cx: &mut gpui::App) {
+        self.save_draft(cx);
+        self.state
+            .applied_filters
+            .set(cx, self.state.draft_filters.get(cx));
         self.state.page.set(cx, 1);
         self.state.bump_rows(cx);
     }
 
     fn clear(&mut self, cx: &mut Context<Self>) {
         self.rows.clear();
+        self.state.draft_filters.set(cx, FilterState::default());
         self.state.applied_filters.set(cx, FilterState::default());
         self.state.page.set(cx, 1);
         self.state.bump_rows(cx);
@@ -133,6 +190,11 @@ impl FilterPanel {
 
 impl Render for FilterPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.state.rows.read(cx).is_none() {
+            return div()
+                .p(px(8.0))
+                .child(Text::new("Loading filters…").size(Size::Xs));
+        }
         self.ensure_synced(cx);
         let colors = crate::theme::palette(cx);
 
@@ -156,15 +218,12 @@ impl Render for FilterPanel {
             );
         }
 
-        let mut controls = Group::new()
-            .gap(Size::Xs)
-            .align(Align::Center)
-            .child(
-                Button::new("filter-add", "+ Add filter")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
-                    .on_click(cx.listener(|this, _, _, cx| this.add_row(cx))),
-            );
+        let mut controls = Group::new().gap(Size::Xs).align(Align::Center).child(
+            Button::new("filter-add", "+ Add filter")
+                .size(Size::Xs)
+                .variant(Variant::Subtle)
+                .on_click(cx.listener(|this, _, _, cx| this.add_row(cx))),
+        );
 
         if self.rows.len() > 1 {
             let logic_or = self.logic_or;
@@ -172,25 +231,35 @@ impl Render for FilterPanel {
                 .child(
                     Button::new("filter-and", "AND")
                         .size(Size::Xs)
-                        .variant(if logic_or { Variant::Subtle } else { Variant::Light })
+                        .variant(if logic_or {
+                            Variant::Subtle
+                        } else {
+                            Variant::Light
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.logic_or = false;
+                            this.save_draft(cx);
                             cx.notify();
                         })),
                 )
                 .child(
                     Button::new("filter-or", "OR")
                         .size(Size::Xs)
-                        .variant(if logic_or { Variant::Light } else { Variant::Subtle })
+                        .variant(if logic_or {
+                            Variant::Light
+                        } else {
+                            Variant::Subtle
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.logic_or = true;
+                            this.save_draft(cx);
                             cx.notify();
                         })),
                 );
         }
 
         controls = controls
-            .child(Divider::vertical())
+            .child(div().w(px(1.0)).h(px(16.0)).bg(colors.border))
             .child(
                 Button::new("filter-apply", "Apply")
                     .size(Size::Xs)

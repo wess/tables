@@ -12,6 +12,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use serde_json::{Map, Value};
 use sqlx::postgres::types::Oid;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgRow, PgSslMode};
@@ -28,13 +29,20 @@ type Row = Map<String, Value>;
 
 pub struct PostgresAdapter {
     config: ConnectionConfig,
+    read_only: bool,
     pool: Mutex<Option<PgPool>>,
 }
 
 impl PostgresAdapter {
+    pub fn readonly(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
     pub fn new(config: &ConnectionConfig) -> Self {
         PostgresAdapter {
             config: config.clone(),
+            read_only: false,
             pool: Mutex::new(None),
         }
     }
@@ -49,6 +57,9 @@ impl PostgresAdapter {
             .database(&c.database);
         if let Some(ssl) = c.ssl.as_ref().filter(|s| s.mode != "disabled") {
             opts = apply_ssl(opts, ssl);
+        }
+        if self.read_only {
+            opts = opts.options([("default_transaction_read_only", "on")]);
         }
         Ok(opts)
     }
@@ -88,26 +99,71 @@ impl Adapter for PostgresAdapter {
     }
 
     async fn query(&self, sql: &str) -> Result<RawResult, String> {
-        let pool = self.pool()?;
         if is_read(sql) {
-            match sqlx::query(sql).fetch_all(&pool).await {
-                Ok(rows) => {
-                    let columns = pg_columns(&pool, &rows, sql).await;
-                    Ok(read_result(&rows, columns))
-                }
-                Err(e) if is_multi(&e) => simple(&pool, sql).await,
-                Err(e) => Err(err(e)),
+            return self.query_bounded(sql, 10_000, 16 * 1024 * 1024).await;
+        }
+        let pool = self.pool()?;
+        match sqlx::query(sql).execute(&pool).await {
+            Ok(done) => Ok(RawResult {
+                rows_affected: done.rows_affected(),
+                ..Default::default()
+            }),
+            Err(e) if is_multi(&e) => simple(&pool, sql).await,
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    async fn stream_rows(
+        &self,
+        sql: &str,
+        tx: tokio::sync::mpsc::Sender<model::Row>,
+    ) -> Result<(), String> {
+        let pool = self.pool()?;
+        let mut stream = sqlx::query(sql).fetch(&pool);
+        while let Some(row) = stream.try_next().await.map_err(err)? {
+            tx.send(row_to_map(&row))
+                .await
+                .map_err(|_| "Export writer stopped".to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn query_bounded(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<RawResult, String> {
+        let pool = self.pool()?;
+        let mut stream = sqlx::raw_sql(sql).fetch(&pool);
+        let mut result = RawResult::default();
+        let mut bytes = 0;
+        while let Some(row) = stream.try_next().await.map_err(err)? {
+            if result.columns.is_empty() {
+                result.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
             }
-        } else {
-            match sqlx::query(sql).execute(&pool).await {
-                Ok(done) => Ok(RawResult {
-                    rows_affected: done.rows_affected(),
-                    ..Default::default()
-                }),
-                Err(e) if is_multi(&e) => simple(&pool, sql).await,
-                Err(e) => Err(err(e)),
+            let row = row_to_map(&row);
+            bytes += serde_json::to_vec(&row).map_err(|e| e.to_string())?.len();
+            if result.rows.len() >= max_rows || bytes > max_bytes {
+                return Err(
+                    "Result exceeds the row or byte budget. Request fewer rows or smaller values."
+                        .into(),
+                );
+            }
+            result.rows.push(row);
+        }
+        drop(stream);
+        if result.columns.is_empty() {
+            if let Ok(description) = pool.describe(sql).await {
+                result.columns = description
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect();
             }
         }
+        result.rows_affected = result.rows.len() as u64;
+        Ok(result)
     }
 
     async fn exec_params(&self, sql: &str, params: &[Value]) -> Result<RawResult, String> {
@@ -120,7 +176,10 @@ impl Adapter for PostgresAdapter {
         } else {
             let q = bind_params!(sqlx::query(sql), params);
             let done = q.execute(&pool).await.map_err(err)?;
-            Ok(RawResult { rows_affected: done.rows_affected(), ..Default::default() })
+            Ok(RawResult {
+                rows_affected: done.rows_affected(),
+                ..Default::default()
+            })
         }
     }
 
@@ -207,13 +266,21 @@ LEFT JOIN pg_catalog.pg_description pgd ON pgd.objoid = st.relid AND pgd.objsubi
 WHERE c.table_name = $1 AND c.table_schema = 'public'
 ORDER BY c.ordinal_position";
         let pool = self.pool()?;
-        let rows = sqlx::query(SQL).bind(table).fetch_all(&pool).await.map_err(err)?;
+        let rows = sqlx::query(SQL)
+            .bind(table)
+            .fetch_all(&pool)
+            .await
+            .map_err(err)?;
         Ok(rows
             .iter()
             .map(|r| ColumnInfo {
                 name: get_string(r, "name"),
                 data_type: get_string(r, "data_type"),
-                nullable: r.try_get::<Option<bool>, _>("nullable").ok().flatten().unwrap_or(false),
+                nullable: r
+                    .try_get::<Option<bool>, _>("nullable")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false),
                 default_value: get_string_opt(r, "default_value"),
                 is_primary_key: r
                     .try_get::<Option<bool>, _>("is_primary_key")
@@ -240,14 +307,22 @@ WHERE t.relname = $1
 GROUP BY i.relname, am.amname, ix.indisunique
 ORDER BY i.relname";
         let pool = self.pool()?;
-        let rows = sqlx::query(SQL).bind(table).fetch_all(&pool).await.map_err(err)?;
+        let rows = sqlx::query(SQL)
+            .bind(table)
+            .fetch_all(&pool)
+            .await
+            .map_err(err)?;
         Ok(rows
             .iter()
             .map(|r| IndexInfo {
                 name: get_string(r, "name"),
                 columns: get_string_array(r, "columns"),
                 kind: get_string(r, "type"),
-                unique: r.try_get::<Option<bool>, _>("is_unique").ok().flatten().unwrap_or(false),
+                unique: r
+                    .try_get::<Option<bool>, _>("is_unique")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false),
             })
             .collect())
     }
@@ -267,7 +342,11 @@ JOIN information_schema.referential_constraints rc ON tc.constraint_name = rc.co
 WHERE tc.table_name = $1 AND tc.constraint_type = 'FOREIGN KEY'
 GROUP BY tc.constraint_name, ccu.table_name, rc.delete_rule, rc.update_rule";
         let pool = self.pool()?;
-        let rows = sqlx::query(SQL).bind(table).fetch_all(&pool).await.map_err(err)?;
+        let rows = sqlx::query(SQL)
+            .bind(table)
+            .fetch_all(&pool)
+            .await
+            .map_err(err)?;
         Ok(rows
             .iter()
             .map(|r| ForeignKeyInfo {
@@ -284,7 +363,11 @@ GROUP BY tc.constraint_name, ccu.table_name, rc.delete_rule, rc.update_rule";
     async fn get_ddl(&self, table: &str) -> Result<String, String> {
         const SQL: &str = "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' ORDER BY ordinal_position";
         let pool = self.pool()?;
-        let rows = sqlx::query(SQL).bind(table).fetch_all(&pool).await.map_err(err)?;
+        let rows = sqlx::query(SQL)
+            .bind(table)
+            .fetch_all(&pool)
+            .await
+            .map_err(err)?;
         let lines: Vec<String> = rows
             .iter()
             .map(|r| {
@@ -302,12 +385,19 @@ GROUP BY tc.constraint_name, ccu.table_name, rc.delete_rule, rc.update_rule";
                 line
             })
             .collect();
-        Ok(format!("CREATE TABLE \"{}\" (\n{}\n);", table, lines.join(",\n")))
+        Ok(format!(
+            "CREATE TABLE \"{}\" (\n{}\n);",
+            table,
+            lines.join(",\n")
+        ))
     }
 
     async fn get_version(&self) -> Result<String, String> {
         let pool = self.pool()?;
-        let row = sqlx::query("SELECT version()").fetch_one(&pool).await.map_err(err)?;
+        let row = sqlx::query("SELECT version()")
+            .fetch_one(&pool)
+            .await
+            .map_err(err)?;
         Ok(get_string_opt(&row, "version").unwrap_or_else(|| "unknown".into()))
     }
 
@@ -353,7 +443,7 @@ fn is_multi(e: &sqlx::Error) -> bool {
 }
 
 fn is_read(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
+    let upper = crate::statement::head(sql).to_uppercase();
     ["SELECT", "WITH", "SHOW", "EXPLAIN", "VALUES", "TABLE"]
         .iter()
         .any(|p| upper.starts_with(p))
@@ -361,7 +451,11 @@ fn is_read(sql: &str) -> bool {
 
 async fn pg_columns(pool: &PgPool, rows: &[PgRow], sql: &str) -> Vec<String> {
     if let Some(first) = rows.first() {
-        return first.columns().iter().map(|c| c.name().to_string()).collect();
+        return first
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
     }
     match pool.describe(sql).await {
         Ok(d) => d.columns().iter().map(|c| c.name().to_string()).collect(),
@@ -410,12 +504,27 @@ fn pg_value(row: &PgRow, i: usize) -> Value {
     let ty = raw.type_info().name().to_uppercase();
     match ty.as_str() {
         "BOOL" => try_json::<bool>(row, i),
-        "INT2" => row.try_get::<i16, _>(i).map(|v| Value::from(v as i64)).unwrap_or(Value::Null),
-        "INT4" => row.try_get::<i32, _>(i).map(|v| Value::from(v as i64)).unwrap_or(Value::Null),
+        "INT2" => row
+            .try_get::<i16, _>(i)
+            .map(|v| Value::from(v as i64))
+            .unwrap_or(Value::Null),
+        "INT4" => row
+            .try_get::<i32, _>(i)
+            .map(|v| Value::from(v as i64))
+            .unwrap_or(Value::Null),
         "INT8" => try_json::<i64>(row, i),
-        "OID" => row.try_get::<Oid, _>(i).map(|v| Value::from(v.0 as i64)).unwrap_or(Value::Null),
-        "FLOAT4" => row.try_get::<f32, _>(i).map(|v| json_f64(v as f64)).unwrap_or(Value::Null),
-        "FLOAT8" => row.try_get::<f64, _>(i).map(json_f64).unwrap_or(Value::Null),
+        "OID" => row
+            .try_get::<Oid, _>(i)
+            .map(|v| Value::from(v.0 as i64))
+            .unwrap_or(Value::Null),
+        "FLOAT4" => row
+            .try_get::<f32, _>(i)
+            .map(|v| json_f64(v as f64))
+            .unwrap_or(Value::Null),
+        "FLOAT8" => row
+            .try_get::<f64, _>(i)
+            .map(json_f64)
+            .unwrap_or(Value::Null),
         "NUMERIC" => row
             .try_get::<BigDecimal, _>(i)
             .map(numeric_json)
@@ -453,12 +562,24 @@ fn pg_value(row: &PgRow, i: usize) -> Value {
 fn pg_array(row: &PgRow, i: usize, name: &str) -> Value {
     let element = name.trim_end_matches("[]");
     let arr = match element {
-        "INT2" => row.try_get::<Vec<i16>, _>(i).map(|v| v.into_iter().map(|n| Value::from(n as i64)).collect()),
-        "INT4" => row.try_get::<Vec<i32>, _>(i).map(|v| v.into_iter().map(|n| Value::from(n as i64)).collect()),
-        "INT8" => row.try_get::<Vec<i64>, _>(i).map(|v| v.into_iter().map(Value::from).collect()),
-        "FLOAT4" => row.try_get::<Vec<f32>, _>(i).map(|v| v.into_iter().map(|n| json_f64(n as f64)).collect()),
-        "FLOAT8" => row.try_get::<Vec<f64>, _>(i).map(|v| v.into_iter().map(json_f64).collect()),
-        "BOOL" => row.try_get::<Vec<bool>, _>(i).map(|v| v.into_iter().map(Value::from).collect()),
+        "INT2" => row
+            .try_get::<Vec<i16>, _>(i)
+            .map(|v| v.into_iter().map(|n| Value::from(n as i64)).collect()),
+        "INT4" => row
+            .try_get::<Vec<i32>, _>(i)
+            .map(|v| v.into_iter().map(|n| Value::from(n as i64)).collect()),
+        "INT8" => row
+            .try_get::<Vec<i64>, _>(i)
+            .map(|v| v.into_iter().map(Value::from).collect()),
+        "FLOAT4" => row
+            .try_get::<Vec<f32>, _>(i)
+            .map(|v| v.into_iter().map(|n| json_f64(n as f64)).collect()),
+        "FLOAT8" => row
+            .try_get::<Vec<f64>, _>(i)
+            .map(|v| v.into_iter().map(json_f64).collect()),
+        "BOOL" => row
+            .try_get::<Vec<bool>, _>(i)
+            .map(|v| v.into_iter().map(Value::from).collect()),
         _ => row
             .try_get::<Vec<String>, _>(i)
             .map(|v| v.into_iter().map(Value::from).collect()),
@@ -470,11 +591,15 @@ fn try_json<'r, T>(row: &'r PgRow, i: usize) -> Value
 where
     T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Into<Value>,
 {
-    row.try_get::<T, _>(i).map(Into::into).unwrap_or(Value::Null)
+    row.try_get::<T, _>(i)
+        .map(Into::into)
+        .unwrap_or(Value::Null)
 }
 
 fn json_f64(f: f64) -> Value {
-    serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
+    serde_json::Number::from_f64(f)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 /// NUMERIC → a JSON number when it parses finitely, else its decimal string

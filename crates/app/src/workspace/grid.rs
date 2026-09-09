@@ -43,9 +43,9 @@ const DEFAULT_BODY_H: f32 = 400.0;
 /// row to agree, so this is the single place a row's height is decided.
 fn row_height(setting: &str) -> f32 {
     match setting {
-        "normal" => 28.0,
-        "comfortable" => 34.0,
-        _ => 22.0,
+        "normal" => 30.0,
+        "comfortable" => 36.0,
+        _ => 26.0,
     }
 }
 
@@ -90,7 +90,12 @@ fn pk_matches(primary_key: &Row, row: &Row) -> bool {
 
 impl DataGrid {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
-        watch(cx, &state.rows);
+        cx.observe(state.rows.entity(), |this, _, cx| {
+            this.editing = None;
+            this.menu = None;
+            cx.notify();
+        })
+        .detach();
         watch(cx, &state.sort);
         watch(cx, &state.selection);
         watch(cx, &state.hidden_columns);
@@ -127,9 +132,17 @@ impl DataGrid {
         let next = match self.state.sort.get(cx) {
             Some(sort) if sort.column == column => SortSpec {
                 column: column.to_string(),
-                direction: if sort.direction == "asc" { "desc" } else { "asc" }.to_string(),
+                direction: if sort.direction == "asc" {
+                    "desc"
+                } else {
+                    "asc"
+                }
+                .to_string(),
             },
-            _ => SortSpec { column: column.to_string(), direction: "asc".to_string() },
+            _ => SortSpec {
+                column: column.to_string(),
+                direction: "asc".to_string(),
+            },
         };
         self.state.sort.set(cx, Some(next));
         self.state.page.set(cx, 1);
@@ -188,7 +201,7 @@ impl DataGrid {
                 .as_ref()
                 .and_then(|r| r.rows.get(editing.row).cloned());
             if let Some(row) = row {
-                let value = if text.is_empty() { Value::Null } else { Value::String(text) };
+                let value = Value::String(text);
                 self.stage_update(row, editing.column, value, cx);
             }
         }
@@ -204,9 +217,11 @@ impl DataGrid {
         let table = self.state.active_table.get(cx).unwrap_or_default();
         self.state.pending.update(cx, move |pending| {
             let merged = pending.iter_mut().any(|change| match change {
-                PendingChange::Update { table: t, primary_key, changes }
-                    if *t == table && pk_matches(primary_key, &row) =>
-                {
+                PendingChange::Update {
+                    table: t,
+                    primary_key,
+                    changes,
+                } if *t == table && pk_matches(primary_key, &row) => {
                     changes.insert(column.clone(), value.clone());
                     true
                 }
@@ -215,7 +230,11 @@ impl DataGrid {
             if !merged {
                 let mut changes = Row::new();
                 changes.insert(column, value);
-                pending.push(PendingChange::Update { table, primary_key: row, changes });
+                pending.push(PendingChange::Update {
+                    table,
+                    primary_key: row,
+                    changes,
+                });
             }
         });
     }
@@ -223,7 +242,12 @@ impl DataGrid {
     /// Explicitly set a cell to SQL NULL (distinct from clearing to an empty
     /// string in the inline editor).
     fn set_cell_null(&mut self, row_idx: usize, column: String, cx: &mut Context<Self>) {
-        let row = self.state.rows.read(cx).as_ref().and_then(|r| r.rows.get(row_idx).cloned());
+        let row = self
+            .state
+            .rows
+            .read(cx)
+            .as_ref()
+            .and_then(|r| r.rows.get(row_idx).cloned());
         if let Some(row) = row {
             self.stage_update(row, column, Value::Null, cx);
         }
@@ -260,7 +284,9 @@ impl DataGrid {
                 .item("Set NULL", {
                     let (this, column) = (this.clone(), column.clone());
                     move |_w, cx| {
-                        this.update(cx, |grid, cx| grid.set_cell_null(row_idx, column.clone(), cx));
+                        this.update(cx, |grid, cx| {
+                            grid.set_cell_null(row_idx, column.clone(), cx)
+                        });
                     }
                 })
         });
@@ -279,7 +305,11 @@ fn row_mark_for(row: &Row, pending: &[PendingChange]) -> (RowMark, Vec<String>) 
             PendingChange::Delete { primary_key, .. } if pk_matches(primary_key, row) => {
                 mark = RowMark::Deleted;
             }
-            PendingChange::Update { primary_key, changes, .. } if pk_matches(primary_key, row) => {
+            PendingChange::Update {
+                primary_key,
+                changes,
+                ..
+            } if pk_matches(primary_key, row) => {
                 if mark == RowMark::None {
                     mark = RowMark::Updated;
                 }
@@ -317,13 +347,30 @@ struct RowColors {
 
 impl DataGrid {
     /// Everything row `idx` needs, or `None` if the page no longer has it.
-    fn snapshot(&self, idx: usize, pending: &[PendingChange], cx: &gpui::App) -> Option<RowSnapshot> {
-        let row = self.state.rows.read(cx).as_ref()?.rows.get(idx)?.clone();
+    fn snapshot(
+        &self,
+        idx: usize,
+        pending: &[PendingChange],
+        cx: &gpui::App,
+    ) -> Option<RowSnapshot> {
+        let mut row = self.state.rows.read(cx).as_ref()?.rows.get(idx)?.clone();
         let (mark, changed) = if pending.is_empty() {
             (RowMark::None, Vec::new())
         } else {
             row_mark_for(&row, pending)
         };
+        for change in pending {
+            if let PendingChange::Update {
+                primary_key,
+                changes,
+                ..
+            } = change
+            {
+                if pk_matches(primary_key, &row) {
+                    row.extend(changes.clone());
+                }
+            }
+        }
         let editing = self
             .editing
             .as_ref()
@@ -357,11 +404,17 @@ fn render_row(
     c: RowColors,
 ) -> AnyElement {
     let bg = if snap.selected {
-        Some(Hsla { a: 0.22, ..c.selected })
+        Some(Hsla {
+            a: 0.22,
+            ..c.selected
+        })
     } else {
         match snap.mark {
             RowMark::Deleted => Some(Hsla { a: 0.12, ..c.red }),
-            RowMark::Updated => Some(Hsla { a: 0.10, ..c.yellow }),
+            RowMark::Updated => Some(Hsla {
+                a: 0.10,
+                ..c.yellow
+            }),
             RowMark::None if stripe_rows && idx % 2 == 1 => Some(c.stripe),
             RowMark::None => None,
         }
@@ -374,6 +427,7 @@ fn render_row(
         .flex()
         .flex_none()
         .w(px(total_w))
+        .min_w_full()
         .h(px(row_h))
         .items_center()
         .border_b_1()
@@ -425,7 +479,13 @@ fn render_row(
             .text_size(px(12.0))
             .font_family(crate::theme::MONO_FAMILY);
         if is_changed {
-            td = td.bg(Hsla { a: 0.10, ..c.yellow }).border_l_2().border_color(c.yellow);
+            td = td
+                .bg(Hsla {
+                    a: 0.10,
+                    ..c.yellow
+                })
+                .border_l_2()
+                .border_color(c.yellow);
         }
 
         if editing_here {
@@ -450,7 +510,9 @@ fn render_row(
                     if event.click_count() != 2 {
                         return;
                     }
-                    let Some(grid) = edit_grid.upgrade() else { return };
+                    let Some(grid) = edit_grid.upgrade() else {
+                        return;
+                    };
                     grid.update(cx, |grid, cx| {
                         let value = grid
                             .state
@@ -462,13 +524,22 @@ fn render_row(
                         grid.start_edit(idx, edit_column.clone(), value.as_ref(), window, cx);
                     });
                 })
-                .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
-                    if let Some(grid) = menu_grid.upgrade() {
-                        grid.update(cx, |grid, cx| {
-                            grid.open_cell_menu(idx, menu_column.clone(), ev.position, window, cx)
-                        });
-                    }
-                });
+                .on_mouse_down(
+                    MouseButton::Right,
+                    move |ev: &MouseDownEvent, window, cx| {
+                        if let Some(grid) = menu_grid.upgrade() {
+                            grid.update(cx, |grid, cx| {
+                                grid.open_cell_menu(
+                                    idx,
+                                    menu_column.clone(),
+                                    ev.position,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }
+                    },
+                );
         }
         tr = tr.child(td);
     }
@@ -498,7 +569,12 @@ impl Render for DataGrid {
         let blue_color = theme.color(ColorName::Blue, 4);
 
         let columns = self.visible_columns(cx);
-        let row_count = self.state.rows.read(cx).as_ref().map_or(0, |r| r.rows.len());
+        let row_count = self
+            .state
+            .rows
+            .read(cx)
+            .as_ref()
+            .map_or(0, |r| r.rows.len());
         if columns.is_empty() || row_count == 0 {
             return div()
                 .flex()
@@ -520,9 +596,10 @@ impl Render for DataGrid {
             .flex()
             .flex_none()
             .w(px(total_w))
+            .min_w_full()
             .h(px(HEADER_H))
             .items_center()
-            .bg(colors.bg_subtle)
+            .bg(colors.grid_header)
             .border_b_1()
             .border_color(colors.border);
         if show_row_numbers {
@@ -549,7 +626,7 @@ impl Render for DataGrid {
                     .h_full()
                     .px(px(10.0))
                     .cursor_pointer()
-                    .text_size(px(11.0))
+                    .text_size(px(12.0))
                     .text_color(colors.text_muted)
                     .child(SharedString::from(column.clone()))
                     .children(arrow.map(|a| Text::new(a).size(Size::Xs).color(blue_color)))
@@ -669,6 +746,7 @@ impl Render for DataGrid {
                     .flex()
                     .flex_col()
                     .w(px(total_w))
+                    .min_w_full()
                     .h_full()
                     .child(header)
                     .child(
@@ -714,11 +792,11 @@ mod tests {
 
     #[test]
     fn row_height_follows_the_setting_and_falls_back_to_compact() {
-        assert_eq!(row_height("compact"), 22.0);
-        assert_eq!(row_height("normal"), 28.0);
-        assert_eq!(row_height("comfortable"), 34.0);
+        assert_eq!(row_height("compact"), 26.0);
+        assert_eq!(row_height("normal"), 30.0);
+        assert_eq!(row_height("comfortable"), 36.0);
         // An unknown value is compact rather than a panic or a zero-height row.
-        assert_eq!(row_height("nonsense"), 22.0);
+        assert_eq!(row_height("nonsense"), 26.0);
     }
 
     #[test]
@@ -730,7 +808,10 @@ mod tests {
                 primary_key: target.clone(),
                 changes: row(1),
             },
-            PendingChange::Delete { table: "t".into(), primary_key: target.clone() },
+            PendingChange::Delete {
+                table: "t".into(),
+                primary_key: target.clone(),
+            },
         ];
         let (mark, _) = row_mark_for(&target, &pending);
         assert!(mark == RowMark::Deleted);
@@ -738,8 +819,10 @@ mod tests {
 
     #[test]
     fn an_untouched_row_is_unmarked() {
-        let pending =
-            vec![PendingChange::Delete { table: "t".into(), primary_key: row(1) }];
+        let pending = vec![PendingChange::Delete {
+            table: "t".into(),
+            primary_key: row(1),
+        }];
         let (mark, changed) = row_mark_for(&row(2), &pending);
         assert!(mark == RowMark::None);
         assert!(changed.is_empty());

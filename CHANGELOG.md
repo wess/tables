@@ -2,6 +2,50 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.3.0 — 2026-09-09
+
+### A compact workspace
+
+Tabs now share the titlebar, with background-only selection, titles that truncate,
+and close controls shown on active or hovered tabs. Each table keeps its page,
+filters, selection, and staged edits. Data/Structure and grouped action icons sit
+in the toolbar below; tooltips explain each action. There is no generic More menu.
+
+The connection list, grid spacing, light and dark surfaces, and narrow-window
+layout have been refreshed. System appearance follows the operating system.
+Staged values remain visible in the grid, and pending changes have their own
+review strip. The assistant drawer no longer passes clicks through to the table.
+
+### Read-only MCP server
+
+Release packages include `tablesmcp`, a standalone stdio server that lists saved
+connections, tables, schema details, and bounded row pages. It opens no network
+listener, requires no running desktop app, skips startup SQL, and opens database
+connections in read-only mode. There are no arbitrary SQL or write tools.
+
+[Setup and tool reference](https://github.com/wess/tables/blob/v0.3.0/docs/mcp.md).
+
+### Stability and resource use
+
+- Bound query results, assistant streams, MCP requests, and retained conversation
+  history. Stop abandoned streams and connection health tasks.
+- Stream table exports and SQL backups to disk, replacing the destination only
+  after success. Ordinary query results are limited to 10,000 rows / 16 MiB.
+- Serialize connection lifecycle operations and scope callbacks to their table.
+  Close owned SSH processes when connections are dropped or setup fails.
+- Write local metadata atomically and serialize changes within the process.
+  Enable native credential storage backends on all supported platforms.
+- Apply write-confirmation settings to actual operations and enforce read-only
+  database sessions. Keep empty strings distinct from NULL in staged edits.
+- Bound update checks, prevent duplicate checks, and apply the automatic-check
+  preference immediately. Downloads require published checksums; macOS upgrades
+  also verify the signing identity.
+
+Validated with 155 workspace tests, strict Clippy, a real stdio MCP handshake,
+and the running macOS UI. Windows builds remain beta and unsigned. Live server
+and platform verification limits are tracked in the
+[stability report](https://github.com/wess/tables/blob/v0.3.0/docs/stability.md).
+
 ## 0.2.2 — 2026-08-26
 
 Built against **guise 1.5.3**. Single-line inputs, labels, picker values, table

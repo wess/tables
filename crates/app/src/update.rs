@@ -1,13 +1,6 @@
-//! Self-update, wired to this repository's GitHub releases.
-//!
-//! guise owns the whole feature — the release feed, the in-place install, the
-//! prompt window. This file only says which repository to watch and what a
-//! genuine Tables build is signed with.
-//!
-//! The codesign requirement is what makes an unattended install safe: without
-//! one, guise refuses to execute a downloaded bundle and opens the release page
-//! instead. It pins the Developer ID team the release workflow notarizes under,
-//! so a DMG served from anywhere else fails the check rather than running.
+//! Guise installs and prompts; Tables schedules bounded release checks and applies preferences.
+
+mod check;
 
 use gpui::App;
 use guise::update::{self, Updater};
@@ -20,19 +13,90 @@ const REPO: &str = "wess/tables";
 const TEAM_ID: &str = "XJDC46F35X";
 
 fn updater() -> Updater {
-    Updater::github("Tables", env!("CARGO_PKG_VERSION"), REPO).codesign_requirement(format!(
-        "anchor apple generic and certificate leaf[subject.OU] = {TEAM_ID}"
-    ))
+    Updater::github("Tables", env!("CARGO_PKG_VERSION"), REPO)
+        .codesign_requirement(format!(
+            "anchor apple generic and certificate leaf[subject.OU] = {TEAM_ID}"
+        ))
+        .require_checksum(true)
 }
 
-/// Start the launch-and-hourly check. Call once, behind the user's preference —
-/// guise itself guards against being started twice.
-pub fn start(cx: &mut App) {
-    update::start(updater(), cx);
+#[derive(Default)]
+struct Checks {
+    automatic: Option<gpui::Task<()>>,
+    manual: Option<gpui::Task<()>>,
+    checking: bool,
+    notified: String,
+}
+impl gpui::Global for Checks {}
+
+pub fn configure(enabled: bool, cx: &mut App) {
+    if cx.try_global::<Checks>().is_none() {
+        cx.set_global(Checks::default());
+    }
+    if !enabled {
+        cx.global_mut::<Checks>().automatic = None;
+        return;
+    }
+    if cx.global::<Checks>().automatic.is_some() {
+        return;
+    }
+    let executor = cx.background_executor().clone();
+    let task = cx.spawn(async move |cx| loop {
+        let config = updater().config().clone();
+        let result = executor.spawn(async move { check::check(&config) }).await;
+        let _ = cx.update(|cx| {
+            if let Ok(update::UpdateCheck::Ready(release)) = result {
+                if !update::is_installing(cx) && cx.global::<Checks>().notified != release.version {
+                    cx.global_mut::<Checks>().notified = release.version.clone();
+                    update::open(updater(), release, cx);
+                }
+            }
+        });
+        executor.timer(update::POLL).await;
+    });
+    cx.global_mut::<Checks>().automatic = Some(task);
 }
 
-/// Help → Check for Updates…. Always answers: the prompt when there is
-/// something to install, a short notice saying why not when there isn't.
+pub fn checking(cx: &App) -> bool {
+    cx.try_global::<Checks>()
+        .is_some_and(|checks| checks.checking)
+}
+
 pub fn check_now(cx: &mut App) {
-    update::check_now(updater(), cx);
+    if cx.try_global::<Checks>().is_none() {
+        cx.set_global(Checks::default());
+    }
+    if cx.global::<Checks>().checking || update::is_installing(cx) {
+        return;
+    }
+    cx.global_mut::<Checks>().checking = true;
+    cx.refresh_windows();
+    let executor = cx.background_executor().clone();
+    let task = cx.spawn(async move |cx| {
+        let config = updater().config().clone();
+        let result = executor.spawn(async move { check::check(&config) }).await;
+        let _ = cx.update(|cx| {
+            cx.global_mut::<Checks>().checking = false;
+            cx.refresh_windows();
+            match result {
+                Ok(update::UpdateCheck::Ready(release)) => {
+                    if !update::is_installing(cx) {
+                        cx.global_mut::<Checks>().notified = release.version.clone();
+                        update::open(updater(), release, cx);
+                    }
+                }
+                other => {
+                    let outcome = match other {
+                        Ok(update::UpdateCheck::Pending(version)) => {
+                            update::UpdateOutcome::Pending(version)
+                        }
+                        Ok(_) => update::UpdateOutcome::UpToDate,
+                        Err(error) => update::UpdateOutcome::Failed(error),
+                    };
+                    update::open_notice(updater(), outcome, cx);
+                }
+            }
+        });
+    });
+    cx.global_mut::<Checks>().manual = Some(task);
 }

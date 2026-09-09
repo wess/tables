@@ -5,6 +5,7 @@
 //! in-memory database survives across statements.
 
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use serde_json::{Map, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{Column, ConnectOptions, Connection, Executor, Row as _, TypeInfo, ValueRef};
@@ -18,10 +19,16 @@ type Row = Map<String, Value>;
 
 pub struct SqliteAdapter {
     path: String,
+    read_only: bool,
     conn: Mutex<Option<SqliteConnection>>,
 }
 
 impl SqliteAdapter {
+    pub fn readonly(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
     pub fn new(config: &ConnectionConfig) -> Self {
         let path = config
             .filepath
@@ -30,6 +37,7 @@ impl SqliteAdapter {
             .unwrap_or_else(|| config.database.clone());
         SqliteAdapter {
             path,
+            read_only: false,
             conn: Mutex::new(None),
         }
     }
@@ -44,11 +52,15 @@ impl Adapter for SqliteAdapter {
     async fn connect(&self) -> Result<(), String> {
         let mut conn = SqliteConnectOptions::new()
             .filename(&self.path)
-            .create_if_missing(true)
+            .create_if_missing(!self.read_only)
+            .read_only(self.read_only)
             .connect()
             .await
             .map_err(err)?;
-        sqlx::query("SELECT 1").execute(&mut conn).await.map_err(err)?;
+        sqlx::query("SELECT 1")
+            .execute(&mut conn)
+            .await
+            .map_err(err)?;
         *self.conn.lock().await = Some(conn);
         Ok(())
     }
@@ -58,35 +70,71 @@ impl Adapter for SqliteAdapter {
     }
 
     async fn query(&self, sql: &str) -> Result<RawResult, String> {
+        if is_read(sql) {
+            return self.query_bounded(sql, 10_000, 16 * 1024 * 1024).await;
+        }
         let mut guard = self.conn.lock().await;
         let conn = guard.as_mut().ok_or_else(not_connected)?;
-        if is_read(sql) {
-            let sqlite_rows = sqlx::query(sql).fetch_all(&mut *conn).await.map_err(err)?;
-            let columns = if let Some(first) = sqlite_rows.first() {
-                column_names(first)
-            } else {
-                // Preserve the column headers for an empty result so the grid
-                // can still render them.
-                match conn.describe(sql).await {
-                    Ok(d) => d.columns().iter().map(|c| c.name().to_string()).collect(),
-                    Err(_) => Vec::new(),
-                }
-            };
-            let rows: Vec<Row> = sqlite_rows.iter().map(row_to_map).collect();
-            let rows_affected = rows.len() as u64;
-            Ok(RawResult {
-                columns,
-                column_types: Map::new(),
-                rows,
-                rows_affected,
-            })
-        } else {
-            let done = sqlx::query(sql).execute(&mut *conn).await.map_err(err)?;
-            Ok(RawResult {
-                rows_affected: done.rows_affected(),
-                ..Default::default()
-            })
+        let done = sqlx::query(sql).execute(&mut *conn).await.map_err(err)?;
+        Ok(RawResult {
+            rows_affected: done.rows_affected(),
+            ..Default::default()
+        })
+    }
+
+    async fn stream_rows(
+        &self,
+        sql: &str,
+        tx: tokio::sync::mpsc::Sender<model::Row>,
+    ) -> Result<(), String> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard.as_mut().ok_or_else(not_connected)?;
+        let mut stream = sqlx::query(sql).fetch(&mut *conn);
+        while let Some(row) = stream.try_next().await.map_err(err)? {
+            tx.send(row_to_map(&row))
+                .await
+                .map_err(|_| "Export writer stopped".to_string())?;
         }
+        Ok(())
+    }
+
+    async fn query_bounded(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<RawResult, String> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard.as_mut().ok_or_else(not_connected)?;
+        let mut stream = sqlx::raw_sql(sql).fetch(&mut *conn);
+        let mut result = RawResult::default();
+        let mut bytes = 0;
+        while let Some(row) = stream.try_next().await.map_err(err)? {
+            if result.columns.is_empty() {
+                result.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+            }
+            let row = row_to_map(&row);
+            bytes += serde_json::to_vec(&row).map_err(|e| e.to_string())?.len();
+            if result.rows.len() >= max_rows || bytes > max_bytes {
+                return Err(
+                    "Result exceeds the row or byte budget. Request fewer rows or smaller values."
+                        .into(),
+                );
+            }
+            result.rows.push(row);
+        }
+        drop(stream);
+        if result.columns.is_empty() {
+            if let Ok(description) = conn.describe(sql).await {
+                result.columns = description
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect();
+            }
+        }
+        result.rows_affected = result.rows.len() as u64;
+        Ok(result)
     }
 
     async fn exec_params(&self, sql: &str, params: &[Value]) -> Result<RawResult, String> {
@@ -105,11 +153,19 @@ impl Adapter for SqliteAdapter {
             };
             let rows: Vec<Row> = sqlite_rows.iter().map(row_to_map).collect();
             let rows_affected = rows.len() as u64;
-            Ok(RawResult { columns, column_types: Map::new(), rows, rows_affected })
+            Ok(RawResult {
+                columns,
+                column_types: Map::new(),
+                rows,
+                rows_affected,
+            })
         } else {
             let q = bind_params!(sqlx::query(sql), params);
             let done = q.execute(&mut *conn).await.map_err(err)?;
-            Ok(RawResult { rows_affected: done.rows_affected(), ..Default::default() })
+            Ok(RawResult {
+                rows_affected: done.rows_affected(),
+                ..Default::default()
+            })
         }
     }
 
@@ -171,7 +227,11 @@ ORDER BY name";
                 let data_type = text(r.get("type"));
                 ColumnInfo {
                     name: text(r.get("name")),
-                    data_type: if data_type.is_empty() { "TEXT".into() } else { data_type },
+                    data_type: if data_type.is_empty() {
+                        "TEXT".into()
+                    } else {
+                        data_type
+                    },
                     nullable: int(r.get("notnull")) == Some(0),
                     default_value: text_opt(r.get("dflt_value")),
                     is_primary_key: int(r.get("pk")) == Some(1),
@@ -191,7 +251,11 @@ ORDER BY name";
             let info = fetch_maps(conn, &format!("PRAGMA index_info(\"{name}\")")).await?;
             indexes.push(IndexInfo {
                 columns: info.iter().map(|r| text(r.get("name"))).collect(),
-                kind: if text(idx.get("origin")) == "pk" { "PRIMARY".into() } else { "BTREE".into() },
+                kind: if text(idx.get("origin")) == "pk" {
+                    "PRIMARY".into()
+                } else {
+                    "BTREE".into()
+                },
                 unique: int(idx.get("unique")) == Some(1),
                 name,
             });
@@ -275,8 +339,10 @@ fn err(e: sqlx::Error) -> String {
 }
 
 fn is_read(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    ["SELECT", "PRAGMA", "WITH"].iter().any(|p| upper.starts_with(p))
+    let upper = crate::statement::head(sql).to_uppercase();
+    ["SELECT", "PRAGMA", "WITH"]
+        .iter()
+        .any(|p| upper.starts_with(p))
 }
 
 async fn fetch_maps(conn: &mut SqliteConnection, sql: &str) -> Result<Vec<Row>, String> {
@@ -307,7 +373,9 @@ fn sqlite_value(row: &SqliteRow, i: usize) -> Value {
     }
     let ty = raw.type_info().name().to_uppercase();
     if ty.contains("INT") {
-        row.try_get::<i64, _>(i).map(Value::from).unwrap_or(Value::Null)
+        row.try_get::<i64, _>(i)
+            .map(Value::from)
+            .unwrap_or(Value::Null)
     } else if ty.contains("REAL") || ty.contains("FLOA") || ty.contains("DOUB") || ty == "NUMERIC" {
         row.try_get::<f64, _>(i)
             .ok()
@@ -374,15 +442,24 @@ mod tests {
     #[tokio::test]
     async fn requires_connect() {
         let adapter = SqliteAdapter::new(&config(":memory:", None));
-        assert_eq!(adapter.query("SELECT 1").await.unwrap_err(), "Not connected");
+        assert_eq!(
+            adapter.query("SELECT 1").await.unwrap_err(),
+            "Not connected"
+        );
     }
 
     #[tokio::test]
     async fn classifies_reads_and_writes() {
         let db = memory().await;
-        let created = db.query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
+        let created = db
+            .query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .await
+            .unwrap();
         assert_eq!(created.rows_affected, 0);
-        let inserted = db.query("INSERT INTO t (name) VALUES ('a'), ('b')").await.unwrap();
+        let inserted = db
+            .query("INSERT INTO t (name) VALUES ('a'), ('b')")
+            .await
+            .unwrap();
         assert_eq!(inserted.rows_affected, 2);
         let read = db.query("select name from t order by name").await.unwrap();
         assert_eq!(read.rows_affected, 2);
@@ -397,18 +474,30 @@ mod tests {
     #[tokio::test]
     async fn introspects_schema() {
         let db = memory().await;
-        db.query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL, age INT DEFAULT 21)")
+        db.query(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL, age INT DEFAULT 21)",
+        )
+        .await
+        .unwrap();
+        db.query("CREATE UNIQUE INDEX idx_users_email ON users(email)")
             .await
             .unwrap();
-        db.query("CREATE UNIQUE INDEX idx_users_email ON users(email)").await.unwrap();
         db.query("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE CASCADE)")
             .await
             .unwrap();
-        db.query("CREATE VIEW v_users AS SELECT * FROM users").await.unwrap();
+        db.query("CREATE VIEW v_users AS SELECT * FROM users")
+            .await
+            .unwrap();
 
         let tables = db.get_tables().await.unwrap();
-        let names: Vec<_> = tables.iter().map(|t| (t.name.as_str(), t.kind.as_str())).collect();
-        assert_eq!(names, vec![("posts", "table"), ("users", "table"), ("v_users", "view")]);
+        let names: Vec<_> = tables
+            .iter()
+            .map(|t| (t.name.as_str(), t.kind.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("posts", "table"), ("users", "table"), ("v_users", "view")]
+        );
         assert!(tables.iter().all(|t| t.row_count.is_none()));
 
         let columns = db.get_columns("users").await.unwrap();
@@ -420,7 +509,10 @@ mod tests {
         assert!(columns.iter().all(|c| c.comment.is_none()));
 
         let indexes = db.get_indexes("users").await.unwrap();
-        let email = indexes.iter().find(|i| i.name == "idx_users_email").unwrap();
+        let email = indexes
+            .iter()
+            .find(|i| i.name == "idx_users_email")
+            .unwrap();
         assert_eq!(email.columns, vec!["email"]);
         assert!(email.unique);
         assert_eq!(email.kind, "BTREE");

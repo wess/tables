@@ -43,9 +43,12 @@ impl Tunnels {
         let local_port = reserve_port()?;
 
         let mut cmd = Command::new("ssh");
-        cmd.arg("-N")
+        cmd.kill_on_drop(true)
+            .arg("-N")
             .arg("-L")
-            .arg(format!("{local_port}:{remote_host}:{remote_port}"))
+            .arg(format!(
+                "127.0.0.1:{local_port}:{remote_host}:{remote_port}"
+            ))
             .arg("-p")
             .arg(ssh.port.to_string())
             .arg("-o")
@@ -60,8 +63,12 @@ impl Tunnels {
             }
         }
         cmd.arg(format!("{}@{}", ssh.username, ssh.host));
-        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to start ssh: {e}"))?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start ssh: {e}"))?;
 
         // Probe the local forward until it accepts a connection. An early exit or
         // a timeout fails with the ssh diagnostic output rather than a bare code.
@@ -71,11 +78,17 @@ impl Tunnels {
                 let stderr = read_stderr(&mut child).await;
                 return Err(format!(
                     "SSH tunnel exited ({}): {}",
-                    status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                    status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".into()),
                     stderr.trim()
                 ));
             }
-            if tokio::net::TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+                .await
+                .is_ok()
+            {
                 self.children.insert(id.to_string(), child);
                 return Ok(local_port);
             }
@@ -110,11 +123,11 @@ fn reserve_port() -> Result<u16, String> {
 
 /// Read the child's captured stderr (bounded), best-effort.
 async fn read_stderr(child: &mut Child) -> String {
-    let Some(mut stderr) = child.stderr.take() else {
+    let Some(stderr) = child.stderr.take() else {
         return String::new();
     };
     let mut buf = Vec::new();
-    let _ = stderr.read_to_end(&mut buf).await;
+    let _ = stderr.take(STDERR_CAP as u64).read_to_end(&mut buf).await;
     buf.truncate(STDERR_CAP);
     String::from_utf8_lossy(&buf).into_owned()
 }

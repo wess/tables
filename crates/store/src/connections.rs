@@ -6,6 +6,8 @@
 use crate::paths;
 use model::{new_uuid, StoredConnection};
 
+static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const FILE: &str = "connections.json";
 
 pub fn load() -> Vec<StoredConnection> {
@@ -26,6 +28,7 @@ pub fn save_all(list: &[StoredConnection]) -> Result<(), String> {
 /// Fills a uuid when the id is empty, replaces in place by id or appends,
 /// returns the saved connection.
 pub fn upsert(conn: &StoredConnection) -> Result<StoredConnection, String> {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut saved = conn.clone();
     if saved.id.is_empty() {
         saved.id = new_uuid();
@@ -41,6 +44,7 @@ pub fn upsert(conn: &StoredConnection) -> Result<StoredConnection, String> {
 
 /// The delete file step — false when the id wasn't stored.
 pub fn remove(id: &str) -> bool {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load();
     let before = list.len();
     list.retain(|c| c.id != id);
@@ -150,7 +154,10 @@ mod tests {
             let mut c = conn("one", "a");
             c.extra.insert("customField".into(), serde_json::json!(42));
             upsert(&c).unwrap();
-            assert_eq!(load()[0].extra.get("customField"), Some(&serde_json::json!(42)));
+            assert_eq!(
+                load()[0].extra.get("customField"),
+                Some(&serde_json::json!(42))
+            );
         });
     }
 }

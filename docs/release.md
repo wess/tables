@@ -8,8 +8,14 @@ same steps you can run by hand.
 
 ## Cutting a release
 
-1. Bump `version` in the workspace `Cargo.toml` (`[workspace.package]`).
-2. Merge to `main`.
+1. Update the changelog, site, guides, and MCP setup for the release.
+2. Bump the workspace version in `Cargo.toml` and refresh `Cargo.lock` with
+   `cargo check --workspace`.
+3. Run `cargo test --locked --workspace` and strict workspace Clippy. Open a PR
+   and wait for Linux Build, Windows Build, and Windows Package to pass.
+4. Merge to `main`, then monitor Release and Pages through completion. Verify
+   downloadable assets, checksums, the Homebrew cask, the Scoop manifest, and the
+   live site.
 
 The workflow notices the new version (no matching `vX.Y.Z` tag yet), tags it,
 creates a GitHub Release, then in parallel: builds and notarizes `Tables.dmg`
@@ -17,7 +23,8 @@ and updates the `tables` cask in
 [`wess/homebrew-packages`](https://github.com/wess/homebrew-packages); builds the
 Linux packages (matrix over x86_64 and aarch64 on native runners); and builds
 the beta Windows artifacts. Everything uploads to the release. The version check
-is idempotent, so re-running is safe.
+skips versions with an existing tag. If an artifact build fails after tagging,
+re-run the failed jobs in that workflow run; a new dispatch would skip the tag.
 
 Because the Linux build includes code that never compiles on the macOS dev host
 (the `#[cfg(target_os = "linux")]` blocks), validate it **before** cutting the
@@ -45,7 +52,7 @@ scripts/linux.sh            # build + package for the host arch
 scripts/linux.sh aarch64    # label the artifacts (still builds natively)
 ```
 
-`scripts/linux.sh` builds the release binary and produces, in `dist/linux/`, a
+`scripts/linux.sh` builds the desktop and standalone MCP release binaries and produces, in `dist/linux/`, a
 `.tar.gz` (FHS tree), a `.deb` (via `cargo-deb`, configured in
 `crates/app/Cargo.toml`'s `[package.metadata.deb]`), and an `.AppImage` (via
 `linuxdeploy` + `appimagetool`, downloaded on demand). It builds **natively** —
@@ -82,6 +89,16 @@ warns. To sign + notarize, set these repository secrets:
 The app is signed with a hardened runtime and `assets/tables.entitlements`
 (GPUI/Metal needs the JIT / unsigned-executable-memory entitlements), then the
 `.app` and `.dmg` are notarized and stapled.
+
+## Site and MCP packaging
+
+Changes under `site/` publish through the Pages workflow to the existing
+`gh-pages` branch and https://wess.io/tables/. The site has no build step.
+Documentation links outside `site/` must use repository URLs.
+
+`tablesmcp` ships in `Tables.app/Contents/MacOS/`, Linux `usr/bin/`, and beside
+`tables.exe` in Windows packages. The macOS helper is signed before the enclosing
+bundle. Check that it is present in downloaded artifacts as well as local builds.
 
 ## Icon
 
