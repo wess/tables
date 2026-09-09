@@ -2,6 +2,7 @@
 //! Query / Structure), and a status bar. The panels share one `WorkspaceState`,
 //! passed in at construction so several connections never collide.
 
+mod approval;
 mod assistant;
 mod charts;
 mod compare;
@@ -18,6 +19,8 @@ mod sessions;
 mod sidebar;
 mod structedit;
 mod structure;
+mod tabs;
+mod views;
 
 use gpui::prelude::*;
 use gpui::{div, px, Context, Entity, PathPromptOptions, Window};
@@ -52,14 +55,20 @@ pub struct Workspace {
     sessions_modal: Option<Entity<SessionsModal>>,
     extensions_modal: Option<Entity<ExtensionsModal>>,
     palette: Entity<Spotlight>,
+    tab_scroll: gpui::ScrollHandle,
+    followed_tab: Option<String>,
 }
 
 impl Workspace {
     pub fn new(connection_id: String, cx: &mut Context<Self>) -> Self {
-        let app = AppState::get(cx);
+        let mut app = AppState::get(cx);
+        app.host = app.host.scoped(&connection_id);
+        approval::listen(app.host.approvals(), cx);
         let state = WorkspaceState::new(cx, connection_id);
         watch(cx, &state.active_tab);
         watch(cx, &state.active_table);
+        watch(cx, &state.open_tables);
+        watch(cx, &state.pending);
         watch(cx, &state.connection);
         watch(cx, &state.rows);
         watch(cx, &state.ai_open);
@@ -119,6 +128,8 @@ impl Workspace {
         let palette = cx.new(Spotlight::new);
 
         let workspace = Workspace {
+            tab_scroll: gpui::ScrollHandle::new(),
+            followed_tab: None,
             app,
             state,
             sidebar,
@@ -245,7 +256,9 @@ impl Workspace {
             for table in &tables {
                 let st = state.clone();
                 let target = table.name.clone();
-                s = s.item(table.name.clone(), move |_w, cx| st.select_table(cx, &target));
+                s = s.item(table.name.clone(), move |_w, cx| {
+                    st.select_table(cx, &target)
+                });
             }
             let ext = this.clone();
             s = s.item_hint("Extensions", "plugins", move |_w, cx| {
@@ -310,6 +323,11 @@ impl Workspace {
         reload_tables(&self.app, &self.state, cx);
     }
 
+    pub fn pause(&self, cx: &mut gpui::App) {
+        self.assistant
+            .update(cx, |assistant, cx| assistant.stop(cx));
+    }
+
     fn leave(&self, cx: &mut Context<Self>) {
         let host = self.app.host.clone();
         let id = self.state.connection_id.clone();
@@ -345,7 +363,7 @@ fn reload_tables(app: &AppState, state: &WorkspaceState, cx: &mut gpui::App) {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::palette(cx);
         let conn = self.state.connection.get(cx);
         let name = conn
@@ -356,55 +374,86 @@ impl Render for Workspace {
         let kind = conn.as_ref().map(|c| c.kind.clone()).unwrap_or_default();
         let active_table = self.state.active_table.get(cx);
         let tab = self.state.active_tab.get(cx);
-        let total = self.state.rows.read(cx).as_ref().map(|r| r.total);
+
         let ai_open = self.state.ai_open.get(cx);
 
-        // --- sidebar column ---
+        let documents = self.documents(cx);
+        let chrome = crate::titlebar::strip(cx)
+            .child(documents)
+            .child(
+                ActionIcon::new("open-document", IconName::Plus)
+                    .size(Size::Sm)
+                    .label("Open table or command (⌘P)")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
+            )
+            .child(crate::titlebar::drag())
+            .child(
+                ActionIcon::new("ws-ai", IconName::Sparkles)
+                    .label("AI assistant")
+                    .size(Size::Sm)
+                    .variant(if ai_open {
+                        Variant::Light
+                    } else {
+                        Variant::Subtle
+                    })
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.state.ai_open.update(cx, |o| *o = !*o)),
+                    ),
+            )
+            .child(
+                ActionIcon::new("ws-compare", IconName::GitCompare)
+                    .label("Compare schemas")
+                    .size(Size::Sm)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_compare(cx))),
+            )
+            .child(
+                ActionIcon::new("ws-erd", IconName::Network)
+                    .label("Relationship diagram")
+                    .size(Size::Sm)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_diagram(cx))),
+            )
+            .child(
+                ActionIcon::new("ws-sessions", IconName::Activity)
+                    .label("Database sessions")
+                    .size(Size::Sm)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_sessions(cx))),
+            )
+            .child(crate::titlebar::update_button(cx))
+            .child(crate::titlebar::settings_button());
+
         let sidebar_header = div()
             .flex()
             .items_center()
-            .justify_between()
+            .gap(px(4.0))
+            .h(px(40.0))
+            .flex_none()
             .px(px(8.0))
-            .py(px(8.0))
             .border_b_1()
             .border_color(colors.border)
             .child(
-                Group::new()
-                    .gap(Size::Xs)
-                    .align(Align::Center)
-                    .child(
-                        Button::new("ws-back", "←")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .on_click(cx.listener(|this, _, _, cx| this.leave(cx))),
-                    )
-                    .child(Text::new(name.clone()).size(Size::Xs).medium()),
+                ActionIcon::new("ws-back", IconName::ArrowLeft)
+                    .label("Back to connections")
+                    .size(Size::Sm)
+                    .on_click(cx.listener(|this, _, _, cx| this.leave(cx))),
             )
             .child(
-                Group::new()
-                    .gap(Size::Xs)
-                    .child(
-                        ActionIcon::new("ws-refresh", "↻")
-                            .variant(Variant::Subtle)
-                            .size(Size::Sm)
-                            .on_click(cx.listener(|this, _, _, cx| this.state.bump_tables(cx))),
-                    )
-                    .child(
-                        ActionIcon::new("ws-search", "⌘")
-                            .variant(Variant::Subtle)
-                            .size(Size::Sm)
-                            .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
-                    )
-                    .child(
-                        ActionIcon::new("ws-settings", "⚙")
-                            .variant(Variant::Subtle)
-                            .size(Size::Sm)
-                            // Root owns the settings modal, so the gear asks
-                            // for it the same way the menu item does.
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(crate::OpenSettings), cx)
-                            }),
-                    ),
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .child(Text::new(name.clone()).size(Size::Xs)),
+            )
+            .child(
+                ActionIcon::new("ws-refresh", IconName::RefreshCw)
+                    .label("Refresh tables")
+                    .size(Size::Sm)
+                    .on_click(cx.listener(|this, _, _, cx| this.state.bump_tables(cx))),
+            )
+            .child(
+                ActionIcon::new("ws-search", IconName::Search)
+                    .label("Command palette (⌘P)")
+                    .size(Size::Sm)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
             );
 
         let sidebar_col = div()
@@ -419,80 +468,6 @@ impl Render for Workspace {
             .child(self.db_switcher.clone())
             .child(div().flex_1().min_h(px(0.0)).child(self.sidebar.clone()));
 
-        // --- tab bar ---
-        let tab_button = |id: &'static str, label: &'static str, this_tab: WorkspaceTab| {
-            Button::new(id, label)
-                .size(Size::Xs)
-                .variant(if tab == this_tab { Variant::Light } else { Variant::Subtle })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.state.active_tab.set(cx, this_tab);
-                }))
-        };
-
-        let mut tabs = Group::new()
-            .gap(Size::Xs)
-            .child(tab_button("tab-data", "Data", WorkspaceTab::Data))
-            .child(tab_button("tab-query", "Query", WorkspaceTab::Query));
-        if active_table.is_some() {
-            tabs = tabs.child(tab_button("tab-structure", "Structure", WorkspaceTab::Structure));
-        }
-
-        let tabbar = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_between()
-            .px(px(8.0))
-            .py(px(6.0))
-            .border_b_1()
-            .border_color(colors.border)
-            .bg(colors.bg_surface)
-            .child(tabs)
-            .child(
-                Group::new()
-                    .gap(Size::Xs)
-                    .align(Align::Center)
-                    .child(Text::new(active_table.clone().unwrap_or_default()).size(Size::Xs).dimmed())
-                    .child(
-                        Button::new("ws-ai", "✦ AI")
-                            .size(Size::Xs)
-                            .variant(if ai_open { Variant::Light } else { Variant::Subtle })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.ai_open.update(cx, |o| *o = !*o);
-                            })),
-                    )
-                    .child(
-                        Button::new("ws-compare", "⇄ Compare")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_compare(cx))),
-                    )
-                    .child(
-                        Button::new("ws-erd", "⊟ ER")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_diagram(cx))),
-                    )
-                    .child(
-                        Button::new("ws-sessions", "⚡ Sessions")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_sessions(cx))),
-                    )
-                    .child(
-                        Button::new("ws-backup", "⭳ Backup")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .on_click(cx.listener(|this, _, _, cx| this.backup_database(cx))),
-                    )
-                    .child(
-                        Button::new("ws-restore", "⭱ Restore")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .on_click(cx.listener(|this, _, _, cx| this.restore_database(cx))),
-                    ),
-            );
-
         // --- active panel ---
         let mut body = div().flex().flex_1().min_h(px(0.0)).overflow_hidden();
         body = match tab {
@@ -502,14 +477,13 @@ impl Render for Workspace {
         };
 
         // --- status bar ---
-        let mut status = StatusBar::new()
-            .left(Text::new(name).size(Size::Xs))
-            .left(Badge::new(theme::type_label(&kind)).size(Size::Sm).color(theme::type_color(&kind)));
+        let mut status = StatusBar::new().left(Text::new(name).size(Size::Xs)).left(
+            Badge::new(theme::type_label(&kind))
+                .size(Size::Sm)
+                .color(theme::type_color(&kind)),
+        );
         if let Some(table) = &active_table {
             status = status.center(Text::new(table.clone()).size(Size::Xs).dimmed());
-        }
-        if let Some(total) = total {
-            status = status.right(Text::new(format!("{total} rows")).size(Size::Xs).dimmed());
         }
 
         let main_col = div()
@@ -518,7 +492,6 @@ impl Render for Workspace {
             .flex_1()
             .min_w(px(0.0))
             .h_full()
-            .child(tabbar)
             .child(body)
             .child(status);
 
@@ -526,9 +499,11 @@ impl Render for Workspace {
             .relative()
             .flex()
             .size_full()
-            .on_action(cx.listener(|this, _: &crate::OpenPalette, window, cx| {
-                this.open_palette(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &crate::OpenPalette, window, cx| {
+                    this.open_palette(window, cx)
+                }),
+            )
             // Query → Execute Query: switch to the Query tab and run the editor.
             .on_action(cx.listener(|this, _: &crate::RunQuery, _, cx| {
                 this.state.active_tab.set(cx, WorkspaceTab::Query);
@@ -557,17 +532,17 @@ impl Render for Workspace {
                 this.state.bump_tables(cx);
             }))
             .on_action(cx.listener(|this, _: &crate::OpenSessions, _, cx| this.open_sessions(cx)))
-            .on_action(cx.listener(|this, _: &crate::OpenExtensions, _, cx| {
-                this.open_extensions(cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &crate::OpenExtensions, _, cx| this.open_extensions(cx)),
+            )
             .on_action(cx.listener(|this, _: &crate::SchemaCompare, _, cx| this.open_compare(cx)))
             .on_action(cx.listener(|this, _: &crate::ErDiagram, _, cx| this.open_diagram(cx)))
-            .on_action(cx.listener(|this, _: &crate::BackupDatabase, _, cx| {
-                this.backup_database(cx)
-            }))
-            .on_action(cx.listener(|this, _: &crate::RestoreDatabase, _, cx| {
-                this.restore_database(cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &crate::BackupDatabase, _, cx| this.backup_database(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::RestoreDatabase, _, cx| this.restore_database(cx)),
+            )
             .on_action(cx.listener(|this, _: &crate::ToggleAi, _, cx| {
                 this.state.ai_open.update(cx, |o| *o = !*o);
             }))
@@ -576,11 +551,31 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &crate::ToggleInspector, _, cx| {
                 this.state.inspector_open.update(cx, |o| *o = !*o);
-            }))
+            }));
+        let mut content = div()
+            .flex()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
             .child(sidebar_col)
             .child(main_col);
-        if ai_open {
-            root = root.child(self.assistant.clone());
+        let floating_ai = ai_open && window.viewport_size().width < px(1040.0);
+        if ai_open && !floating_ai {
+            content = content.child(self.assistant.clone());
+        }
+        root = root.flex_col().child(chrome).child(content);
+        if floating_ai {
+            root = root.child(
+                div()
+                    .id("assistant-drawer")
+                    .occlude()
+                    .absolute()
+                    .top(px(crate::titlebar::HEIGHT))
+                    .right_0()
+                    .bottom_0()
+                    .w(px(360.0))
+                    .child(self.assistant.clone()),
+            );
         }
         if let Some(modal) = &self.compare_modal {
             root = root.child(modal.clone());

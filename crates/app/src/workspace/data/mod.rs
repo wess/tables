@@ -24,6 +24,7 @@ pub struct DataPanel {
     app: AppState,
     state: WorkspaceState,
     grid: Entity<DataGrid>,
+    menu: Entity<ContextMenu>,
     filter: Entity<FilterPanel>,
     insert: Option<Entity<InsertModal>>,
     show_review: bool,
@@ -36,7 +37,51 @@ pub struct DataPanel {
 }
 
 impl DataPanel {
+    fn open_copy(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = !self.state.selection.read(cx).is_empty();
+        let target = cx.weak_entity();
+        let menu = cx.new(move |cx| {
+            let mut menu = ContextMenu::new(cx).size(Size::Sm).width(250.0);
+            for (label, action) in [("Copy selected rows", 0), ("Copy as INSERT statements", 1)] {
+                if !selected {
+                    continue;
+                }
+                let target = target.clone();
+                let handler = move |_: &mut Window, cx: &mut gpui::App| {
+                    if let Some(target) = target.upgrade() {
+                        target.update(cx, |this, cx| {
+                            if this.busy.get(cx) || this.committing.get(cx) {
+                                return;
+                            }
+                            match action {
+                                0 => this.copy_selection(cx),
+                                _ => this.copy_as_insert(cx),
+                            }
+                        });
+                    }
+                };
+                menu = menu.item(label, handler);
+            }
+            menu
+        });
+        menu.update(cx, |menu, cx| menu.show(position, window, cx));
+        self.menu = menu;
+        cx.notify();
+    }
+
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
+        cx.observe(state.active_table.entity(), |this, _, cx| {
+            this.insert = None;
+            this.show_review = false;
+            this.confirm_discard = false;
+            cx.notify();
+        })
+        .detach();
         watch(cx, &state.rows);
         watch(cx, &state.rows_loading);
         watch(cx, &state.selection);
@@ -63,10 +108,12 @@ impl DataPanel {
             fetch_rows(&effect_app, &effect_state, cx);
         });
 
+        let menu = cx.new(ContextMenu::new);
         DataPanel {
             app,
             state,
             grid,
+            menu,
             filter,
             insert: None,
             show_review: false,
@@ -109,6 +156,8 @@ fn fetch_rows(app: &AppState, state: &WorkspaceState, cx: &mut gpui::App) {
     // state with an older result.
     let generation = state.rows_epoch.get(cx);
     let epoch = state.rows_epoch.clone();
+    let selection = state.selection.clone();
+    let restoring = state.restoring_selection.clone();
     bridge::run(
         cx,
         async move { host.table_rows(&request).await },
@@ -118,7 +167,22 @@ fn fetch_rows(app: &AppState, state: &WorkspaceState, cx: &mut gpui::App) {
             }
             loading.set(cx, false);
             match result {
-                Ok(response) => rows.set(cx, Some(response)),
+                Ok(response) => {
+                    let wanted = restoring.get(cx);
+                    if !wanted.is_empty() {
+                        selection.set(
+                            cx,
+                            response
+                                .rows
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, row)| wanted.contains(row).then_some(i))
+                                .collect(),
+                        );
+                        restoring.set(cx, Vec::new());
+                    }
+                    rows.set(cx, Some(response));
+                }
                 Err(error) => {
                     rows.set(cx, None);
                     toasts.error(cx, "Load failed", &error);
@@ -150,7 +214,13 @@ impl Render for DataPanel {
 
         let page = self.state.page.get(cx);
         let page_size = self.page_size(cx);
-        let total = self.state.rows.read(cx).as_ref().map(|r| r.total).unwrap_or(0);
+        let total = self
+            .state
+            .rows
+            .read(cx)
+            .as_ref()
+            .map(|r| r.total)
+            .unwrap_or(0);
         let last_page = (total.max(0) as u64).div_ceil(page_size).max(1);
 
         let pagination = div()
@@ -178,7 +248,11 @@ impl Render for DataPanel {
                                 }
                             })),
                     )
-                    .child(Text::new(format!("Page {page} of {last_page}")).size(Size::Xs).dimmed())
+                    .child(
+                        Text::new(format!("Page {page} of {last_page}"))
+                            .size(Size::Xs)
+                            .dimmed(),
+                    )
                     .child(
                         Button::new("page-next", "›")
                             .size(Size::Xs)
@@ -212,7 +286,12 @@ impl Render for DataPanel {
         if filter_open {
             root = root.child(self.filter.clone());
         }
-        let mut root = root.child(mid).child(pagination);
+        let pending = self.state.pending.read(cx).len();
+        let mut root = root.child(mid);
+        if pending > 0 {
+            root = root.child(self.pending_bar(cx, pending));
+        }
+        let mut root = root.child(pagination);
 
         if self.show_review {
             root = root.child(self.review_modal(cx));
@@ -242,6 +321,6 @@ impl Render for DataPanel {
             );
         }
 
-        root.into_any_element()
+        root.child(self.menu.clone()).into_any_element()
     }
 }

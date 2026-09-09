@@ -5,6 +5,8 @@
 use crate::paths;
 use model::{iso_now, new_uuid, Favorite};
 
+static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const FILE: &str = "favorites.json";
 
 pub fn load() -> Result<Vec<Favorite>, String> {
@@ -18,6 +20,7 @@ pub fn save(
     sql: &str,
     created_at: Option<String>,
 ) -> Result<Favorite, String> {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let favorite = Favorite {
         id: id.filter(|s| !s.is_empty()).unwrap_or_else(new_uuid),
         name: name.into(),
@@ -35,6 +38,7 @@ pub fn save(
 
 /// Ok(false) when the id wasn't stored.
 pub fn remove(id: &str) -> Result<bool, String> {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load()?;
     let before = list.len();
     list.retain(|f| f.id != id);
@@ -82,7 +86,13 @@ mod tests {
         testenv(|| {
             let first = save(Some("f1".into()), "a", "SELECT 1", Some("t1".into())).unwrap();
             save(Some("f2".into()), "b", "SELECT 2", None).unwrap();
-            save(Some("f1".into()), "renamed", "SELECT 3", Some(first.created_at)).unwrap();
+            save(
+                Some("f1".into()),
+                "renamed",
+                "SELECT 3",
+                Some(first.created_at),
+            )
+            .unwrap();
             let list = load().unwrap();
             assert_eq!(list.len(), 2);
             assert_eq!(list[0].id, "f1");

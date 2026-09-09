@@ -41,6 +41,13 @@ pub struct StructurePanel {
 
 impl StructurePanel {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
+        cx.observe(state.active_table.entity(), |this, _, cx| {
+            this.edit = None;
+            this.confirm = None;
+            this.tab.set(cx, Tab::Columns);
+            cx.notify();
+        })
+        .detach();
         let structure = Signal::new(cx, None);
         let ddl = Signal::new(cx, None);
         let profile = Signal::new(cx, None);
@@ -56,6 +63,7 @@ impl StructurePanel {
         let effect_profile = profile.clone();
         let effect_active = state.active_table.clone();
         use_effect(cx, &state.active_table, move |table, cx| {
+            effect_structure.set(cx, None);
             effect_ddl.set(cx, None);
             effect_profile.set(cx, None);
             let Some(table) = table.clone() else {
@@ -63,7 +71,13 @@ impl StructurePanel {
                 return;
             };
             // Ignore a completion for a table that is no longer selected.
-            fetch_structure(&effect_app, &effect_structure, Some(&effect_active), table, cx);
+            fetch_structure(
+                &effect_app,
+                &effect_structure,
+                Some(&effect_active),
+                table,
+                cx,
+            );
         });
 
         StructurePanel {
@@ -90,13 +104,16 @@ impl StructurePanel {
     // --- edit entry points ---------------------------------------------------
 
     fn open_edit(&mut self, modal: Entity<StructEditModal>, cx: &mut Context<Self>) {
-        cx.subscribe(&modal, |this, _m, event: &StructEditEvent, cx| match event {
-            StructEditEvent::Cancel => {
-                this.edit = None;
-                cx.notify();
-            }
-            StructEditEvent::Submit(op) => this.run_op(op, cx),
-        })
+        cx.subscribe(
+            &modal,
+            |this, _m, event: &StructEditEvent, cx| match event {
+                StructEditEvent::Cancel => {
+                    this.edit = None;
+                    cx.notify();
+                }
+                StructEditEvent::Submit(op) => this.run_op(op, cx),
+            },
+        )
         .detach();
         self.edit = Some(modal);
         cx.notify();
@@ -147,7 +164,7 @@ impl StructurePanel {
             Ok(_) => {
                 toasts.success(cx, "Structure updated", 1500);
                 state.bump_tables(cx);
-                fetch_structure(&app, &structure, None, table, cx);
+                fetch_structure(&app, &structure, Some(&state.active_table), table, cx);
             }
             Err(e) => toasts.error(cx, "Change failed", &e),
         });
@@ -181,7 +198,7 @@ impl StructurePanel {
             Ok(_) => {
                 toasts.success(cx, "Dropped", 1500);
                 state.bump_tables(cx);
-                fetch_structure(&app, &structure, None, refetch, cx);
+                fetch_structure(&app, &structure, Some(&state.active_table), refetch, cx);
             }
             Err(e) => toasts.error(cx, "Drop failed", &e),
         });
@@ -195,12 +212,19 @@ impl StructurePanel {
         let host = self.app.host.clone();
         let out = self.ddl.clone();
         let toasts = self.app.toasts.clone();
+        let owner = self.state.active_table.clone();
+        let want = table.clone();
         bridge::run(
             cx,
             async move { host.table_ddl(&table).await },
-            move |result, cx| match result {
-                Ok(ddl) => out.set(cx, Some(ddl)),
-                Err(error) => toasts.error(cx, "DDL failed", &error),
+            move |result, cx| {
+                if owner.get(cx).as_deref() != Some(want.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(ddl) => out.set(cx, Some(ddl)),
+                    Err(error) => toasts.error(cx, "DDL failed", &error),
+                }
             },
         );
     }
@@ -212,12 +236,19 @@ impl StructurePanel {
         let host = self.app.host.clone();
         let out = self.profile.clone();
         let toasts = self.app.toasts.clone();
+        let owner = self.state.active_table.clone();
+        let want = table.clone();
         bridge::run(
             cx,
             async move { host.profile_table(&table).await },
-            move |result, cx| match result {
-                Ok(profile) => out.set(cx, Some(profile)),
-                Err(error) => toasts.error(cx, "Profile failed", &error),
+            move |result, cx| {
+                if owner.get(cx).as_deref() != Some(want.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(profile) => out.set(cx, Some(profile)),
+                    Err(error) => toasts.error(cx, "Profile failed", &error),
+                }
             },
         );
     }
@@ -270,9 +301,11 @@ impl StructurePanel {
                                 )
                                 .size(Size::Xs)
                                 .variant(Variant::Subtle)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_rename_column(name_rename.clone(), cx)
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.open_rename_column(name_rename.clone(), cx)
+                                    },
+                                )),
                             )
                             .child(
                                 ActionIcon::new(
@@ -282,9 +315,11 @@ impl StructurePanel {
                                 .size(Size::Xs)
                                 .variant(Variant::Subtle)
                                 .color(ColorName::Red)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.request_drop(DropTarget::Column(name_drop.clone()), cx)
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.request_drop(DropTarget::Column(name_drop.clone()), cx)
+                                    },
+                                )),
                             ),
                     ),
             );
@@ -295,7 +330,10 @@ impl StructurePanel {
     fn indexes_view(&self, structure: &TableStructure, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = crate::theme::palette(cx);
         if structure.indexes.is_empty() {
-            return Text::new("No indexes").size(Size::Sm).dimmed().into_any_element();
+            return Text::new("No indexes")
+                .size(Size::Sm)
+                .dimmed()
+                .into_any_element();
         }
         let header = div()
             .flex()
@@ -334,9 +372,11 @@ impl StructurePanel {
                             .size(Size::Xs)
                             .variant(Variant::Subtle)
                             .color(ColorName::Red)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request_drop(DropTarget::Index(name_drop.clone()), cx)
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.request_drop(DropTarget::Index(name_drop.clone()), cx)
+                                },
+                            )),
                         ),
                     ),
             );
@@ -408,10 +448,15 @@ fn op_future(
                 )
                 .await
             }
-            EditOp::RenameColumn { table, from, to } => host.rename_column(&table, &from, &to).await,
-            EditOp::CreateIndex { table, name, columns, unique } => {
-                host.create_index(&table, &name, &columns, unique).await
+            EditOp::RenameColumn { table, from, to } => {
+                host.rename_column(&table, &from, &to).await
             }
+            EditOp::CreateIndex {
+                table,
+                name,
+                columns,
+                unique,
+            } => host.create_index(&table, &name, &columns, unique).await,
             EditOp::CreateTable { name, columns } => host.create_table(&name, &columns).await,
         }
     }
@@ -419,26 +464,39 @@ fn op_future(
 
 fn clone_op(op: &EditOp) -> EditOp {
     match op {
-        EditOp::AddColumn { table, column } => {
-            EditOp::AddColumn { table: table.clone(), column: column.clone() }
-        }
-        EditOp::RenameColumn { table, from, to } => {
-            EditOp::RenameColumn { table: table.clone(), from: from.clone(), to: to.clone() }
-        }
-        EditOp::CreateIndex { table, name, columns, unique } => EditOp::CreateIndex {
+        EditOp::AddColumn { table, column } => EditOp::AddColumn {
+            table: table.clone(),
+            column: column.clone(),
+        },
+        EditOp::RenameColumn { table, from, to } => EditOp::RenameColumn {
+            table: table.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        EditOp::CreateIndex {
+            table,
+            name,
+            columns,
+            unique,
+        } => EditOp::CreateIndex {
             table: table.clone(),
             name: name.clone(),
             columns: columns.clone(),
             unique: *unique,
         },
-        EditOp::CreateTable { name, columns } => {
-            EditOp::CreateTable { name: name.clone(), columns: columns.clone() }
-        }
+        EditOp::CreateTable { name, columns } => EditOp::CreateTable {
+            name: name.clone(),
+            columns: columns.clone(),
+        },
     }
 }
 
 fn hcell(label: &str) -> impl IntoElement {
-    div().flex_1().min_w(px(0.0)).px(px(6.0)).child(Text::new(label.to_string()).size(Size::Xs).dimmed())
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .px(px(6.0))
+        .child(Text::new(label.to_string()).size(Size::Xs).dimmed())
 }
 
 fn cell(text: String) -> impl IntoElement {
@@ -462,13 +520,18 @@ fn table_tab(
     cx: &mut Context<StructurePanel>,
 ) -> impl IntoElement {
     Button::new(id, label)
+        .color(ColorName::Gray)
         .size(Size::Xs)
-        .variant(if active == this_tab { Variant::Light } else { Variant::Subtle })
+        .variant(if active == this_tab {
+            Variant::Light
+        } else {
+            Variant::Subtle
+        })
         .on_click(cx.listener(move |this, _, _, cx| this.select_tab(this_tab, cx)))
 }
 
 impl Render for StructurePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         if self.state.active_table.read(cx).is_none() {
             return div()
@@ -482,46 +545,74 @@ impl Render for StructurePanel {
         let structure = self.structure.get(cx);
         let col_count = structure.as_ref().map(|s| s.columns.len()).unwrap_or(0);
         let idx_count = structure.as_ref().map(|s| s.indexes.len()).unwrap_or(0);
-        let fk_count = structure.as_ref().map(|s| s.foreign_keys.len()).unwrap_or(0);
+        let fk_count = structure
+            .as_ref()
+            .map(|s| s.foreign_keys.len())
+            .unwrap_or(0);
 
-        // Contextual edit action for the active sub-tab.
+        let compact = window.viewport_size().width < px(1200.0);
         let action = match active {
             Tab::Columns => Some(
-                Button::new("st-add-col", "＋ Column")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
+                ActionIcon::new("st-add-col", IconName::Plus)
+                    .size(Size::Sm)
+                    .label("Add column")
                     .on_click(cx.listener(|this, _, _, cx| this.open_add_column(cx))),
             ),
             Tab::Indexes => Some(
-                Button::new("st-add-idx", "＋ Index")
-                    .size(Size::Xs)
-                    .variant(Variant::Subtle)
+                ActionIcon::new("st-add-idx", IconName::Plus)
+                    .size(Size::Sm)
+                    .label("Create index")
                     .on_click(cx.listener(|this, _, _, cx| this.open_create_index(cx))),
             ),
             _ => None,
         };
-
-        let tabbar = div()
+        let mut tabbar = div()
             .flex()
             .flex_none()
             .items_center()
-            .gap_1()
-            .px(px(8.0))
-            .py(px(6.0))
+            .h(px(40.0))
+            .gap(px(4.0))
+            .px(px(12.0))
+            .bg(colors.bg_subtle)
             .border_b_1()
-            .border_color(colors.border)
-            .child(table_tab("st-cols", "Columns", Tab::Columns, active, cx))
-            .child(table_tab("st-idx", "Indexes", Tab::Indexes, active, cx))
-            .child(table_tab("st-fk", "Foreign Keys", Tab::ForeignKeys, active, cx))
-            .child(table_tab("st-ddl", "DDL", Tab::Ddl, active, cx))
-            .child(table_tab("st-prof", "Profile", Tab::Profile, active, cx))
-            .child(
-                Text::new(format!("{col_count} cols · {idx_count} idx · {fk_count} fk"))
+            .border_color(colors.border);
+        for (id, label, icon, target) in [
+            ("st-cols", "Columns", IconName::Table2, Tab::Columns),
+            ("st-idx", "Indexes", IconName::List, Tab::Indexes),
+            ("st-fk", "Foreign keys", IconName::Network, Tab::ForeignKeys),
+            ("st-ddl", "DDL", IconName::Code, Tab::Ddl),
+            ("st-prof", "Profile", IconName::ChartColumn, Tab::Profile),
+        ] {
+            if compact {
+                tabbar = tabbar.child(
+                    ActionIcon::new(id, icon)
+                        .size(Size::Sm)
+                        .label(label)
+                        .variant(if active == target {
+                            Variant::Light
+                        } else {
+                            Variant::Subtle
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_tab(target, cx))),
+                );
+            } else {
+                tabbar = tabbar.child(table_tab(id, label, target, active, cx));
+            }
+        }
+        let tabbar = tabbar
+            .child(div().flex_1())
+            .when(!compact, |d| {
+                d.child(
+                    Text::new(format!(
+                        "{col_count} columns · {idx_count} indexes · {fk_count} keys"
+                    ))
                     .size(Size::Xs)
                     .dimmed(),
-            )
-            .child(div().flex_1())
-            .children(action);
+                )
+            })
+            .children(action)
+            .child(div().w(px(1.0)).h(px(18.0)).mx(px(4.0)).bg(colors.border))
+            .child(super::views::selector(&self.state, cx));
 
         let content = match active {
             Tab::Columns | Tab::Indexes | Tab::ForeignKeys => {
@@ -553,21 +644,16 @@ impl Render for StructurePanel {
             },
         };
 
-        let mut root = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .child(tabbar)
-            .child(
-                div()
-                    .id("structure-scroll")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .overflow_x_scroll()
-                    .p(px(12.0))
-                    .child(content),
-            );
+        let mut root = div().flex().flex_col().size_full().child(tabbar).child(
+            div()
+                .id("structure-scroll")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .overflow_x_scroll()
+                .p(px(12.0))
+                .child(content),
+        );
 
         if let Some(edit) = &self.edit {
             root = root.child(edit.clone());
@@ -616,17 +702,27 @@ fn center_loader() -> gpui::AnyElement {
 
 fn foreign_keys_table(structure: &TableStructure) -> gpui::AnyElement {
     if structure.foreign_keys.is_empty() {
-        return Text::new("No foreign keys").size(Size::Sm).dimmed().into_any_element();
+        return Text::new("No foreign keys")
+            .size(Size::Sm)
+            .dimmed()
+            .into_any_element();
     }
-    let mut table = Table::new()
-        .with_border(true)
-        .striped(true)
-        .head(["Name", "Columns", "References", "On Delete", "On Update"]);
+    let mut table = Table::new().with_border(true).striped(true).head([
+        "Name",
+        "Columns",
+        "References",
+        "On Delete",
+        "On Update",
+    ]);
     for fk in &structure.foreign_keys {
         table = table.row([
             fk.name.clone(),
             fk.columns.join(", "),
-            format!("{}({})", fk.referenced_table, fk.referenced_columns.join(", ")),
+            format!(
+                "{}({})",
+                fk.referenced_table,
+                fk.referenced_columns.join(", ")
+            ),
             fk.on_delete.clone(),
             fk.on_update.clone(),
         ]);
@@ -636,7 +732,10 @@ fn foreign_keys_table(structure: &TableStructure) -> gpui::AnyElement {
 
 fn profile_table(profile: &[ColumnProfile]) -> gpui::AnyElement {
     if profile.is_empty() {
-        return Text::new("No profile data").size(Size::Sm).dimmed().into_any_element();
+        return Text::new("No profile data")
+            .size(Size::Sm)
+            .dimmed()
+            .into_any_element();
     }
     let mut table = Table::new()
         .with_border(true)

@@ -2,13 +2,20 @@
 
 ## Run SQL
 
-Enter SQL in the Query tab and press `⌘↵`, or select **Run**. Multiple statements are supported. Each statement produces its own result record, including returned columns and rows or the affected row count.
+Enter SQL in the SQL editor tab and press `⌘↵`, or select **Run SQL**. Multiple statements are supported. Each statement produces its own result record, including returned columns and rows or the affected row count.
 
-The statement splitter recognizes semicolons at line endings. It is intentionally lightweight and does not fully parse SQL strings or procedural bodies. Run stored procedures, triggers, and scripts with embedded semicolons cautiously.
+The statement splitter recognizes quoted strings, quoted identifiers, and SQL
+comments. It is not a complete dialect parser; use engine-native tools for
+procedural scripts, dollar-quoted bodies, and client delimiter commands.
 
 ## Results
 
 Read results appear in a grid. Write statements report affected rows. A failed run clears the current results and displays the database error.
+
+Read results are bounded to 10,000 rows / 16 MiB. Use table export when you need
+all rows. The toolbar provides direct controls for formatting, history, favorites,
+explain, transaction execution, charts, export, and copying Markdown. Actions
+that require SQL or results are disabled until those are available.
 
 ## History
 

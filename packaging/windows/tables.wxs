@@ -30,6 +30,9 @@
         <File Id="TablesExe" Source="$(StageDir)\tables.exe" KeyPath="yes" />
       </Component>
       <Component Directory="INSTALLFOLDER">
+        <File Source="$(StageDir)\tablesmcp.exe" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
         <File Source="$(StageDir)\LICENSE" />
       </Component>
       <Component Directory="INSTALLFOLDER">

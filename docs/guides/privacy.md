@@ -1,6 +1,9 @@
 # Data and privacy
 
-Tables is a local desktop application. It does not include analytics or telemetry. Network traffic is limited to the database servers and SSH hosts you configure, plus any operating-system behavior of the native TLS and SSH tools.
+Tables is a local desktop application. It does not include analytics or telemetry. Network traffic includes the database servers and SSH hosts you configure,
+GitHub release checks when enabled, and optional assistant requests you initiate.
+Assistant requests include the conversation and schema context; query results
+can also be included when you enable that setting.
 
 ## Local data
 
@@ -16,7 +19,19 @@ Use `TABLES_DIR` to relocate this directory.
 
 ## Credentials
 
-Connection records currently persist with the rest of the connection JSON. Protect the account and filesystem accordingly. For sensitive environments, use a restricted database role, short-lived credentials where possible, and full-disk encryption.
+Connection passwords are saved to the OS credential store when available. A
+legacy plaintext password is migrated after a successful credential-store write.
+If the credential store is unavailable, connection passwords can remain in the
+JSON record. Protect the account and filesystem accordingly. Assistant credentials
+use the OS credential store. For sensitive environments, use a restricted database role, short-lived credentials where possible, and full-disk encryption.
+
+## MCP clients
+
+The optional `tablesmcp` process exposes saved connections, schemas, and rows to
+the client that starts it. It uses stdio and opens no HTTP listener. Database
+sessions are read-only and skip startup SQL. The desktop app need not be open.
+Use a dedicated database role and `TABLES_DIR` profile to limit what a client can
+access. See the [MCP guide](../mcp.md).
 
 ## Backups
 

@@ -22,7 +22,12 @@ impl DbSwitcher {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
         watch(cx, &state.databases);
         watch(cx, &state.connection);
-        DbSwitcher { app, state, select: None, built_for: (Vec::new(), String::new()) }
+        DbSwitcher {
+            app,
+            state,
+            select: None,
+            built_for: (Vec::new(), String::new()),
+        }
     }
 
     /// Reconnect to `database`, reload its tables, and reset the data view.
@@ -31,15 +36,27 @@ impl DbSwitcher {
         let host = self.app.host.clone();
         let tables = self.state.tables.clone();
         let loading = self.state.tables_loading.clone();
-        let active = self.state.active_table.clone();
-        let rows = self.state.rows.clone();
+
         let connection = self.state.connection.clone();
         let toasts = self.app.toasts.clone();
         let applied = database.clone();
 
+        if self
+            .state
+            .open_tables
+            .read(cx)
+            .iter()
+            .any(|t| self.state.table_dirty(t, cx))
+        {
+            toasts.warn(
+                cx,
+                "Staged changes",
+                "Commit or discard your table edits before switching databases.",
+            );
+            return;
+        }
         loading.set(cx, true);
-        active.set(cx, None);
-        rows.set(cx, None);
+        self.state.reset_tables(cx);
         bridge::run(
             cx,
             async move {
@@ -68,7 +85,10 @@ impl Render for DbSwitcher {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let databases = self.state.databases.get(cx);
         let connection = self.state.connection.get(cx);
-        let kind = connection.as_ref().map(|c| c.kind.clone()).unwrap_or_default();
+        let kind = connection
+            .as_ref()
+            .map(|c| c.kind.clone())
+            .unwrap_or_default();
         let current = connection.map(|c| c.database).unwrap_or_default();
 
         if databases.len() <= 1 || kind == "sqlite" {
@@ -78,15 +98,23 @@ impl Render for DbSwitcher {
         if self.select.is_none() || self.built_for != (databases.clone(), current.clone()) {
             let selected = databases.iter().position(|d| d == &current).unwrap_or(0);
             let options = databases.clone();
-            let select =
-                cx.new(move |cx| Select::new(cx).data(options).selected(selected).size(Size::Xs));
+            let select = cx.new(move |cx| {
+                Select::new(cx)
+                    .data(options)
+                    .selected(selected)
+                    .size(Size::Xs)
+            });
             cx.subscribe(&select, |this, _select, event: &SelectEvent, cx| {
                 let databases = this.state.databases.get(cx);
                 let Some(database) = databases.get(event.0).cloned() else {
                     return;
                 };
-                let current =
-                    this.state.connection.get(cx).map(|c| c.database).unwrap_or_default();
+                let current = this
+                    .state
+                    .connection
+                    .get(cx)
+                    .map(|c| c.database)
+                    .unwrap_or_default();
                 if database != current {
                     this.switch(database, cx);
                 }

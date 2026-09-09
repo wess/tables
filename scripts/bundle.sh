@@ -26,8 +26,8 @@ if [ ! -f assets/icon.icns ]; then
   scripts/icon.sh
 fi
 
-echo "[bundle] cargo build --release -p app"
-cargo build --release -p app
+echo "[bundle] cargo build --locked --release -p app -p tablesmcp"
+cargo build --locked --release -p app -p tablesmcp
 
 app="dist/$app_name.app"
 contents="$app/Contents"
@@ -35,6 +35,7 @@ rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
 
 cp "target/release/$src_bin" "$contents/MacOS/$bin_name"
+cp target/release/tablesmcp "$contents/MacOS/tablesmcp"
 cp assets/icon.icns "$contents/Resources/icon.icns"
 
 cat > "$contents/Info.plist" << PLIST
@@ -78,6 +79,8 @@ runtime_opts=()
 codesign --force ${runtime_opts[@]+"${runtime_opts[@]}"} \
   --entitlements assets/tables.entitlements \
   -s "$identity" "$contents/MacOS/$bin_name"
+codesign --force ${runtime_opts[@]+"${runtime_opts[@]}"} \
+  -s "$identity" "$contents/MacOS/tablesmcp"
 codesign --force ${runtime_opts[@]+"${runtime_opts[@]}"} \
   --entitlements assets/tables.entitlements \
   -s "$identity" "$app"

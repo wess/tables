@@ -11,6 +11,7 @@ mod root;
 mod settings;
 mod sheet;
 mod theme;
+mod titlebar;
 mod update;
 mod workspace;
 
@@ -115,7 +116,10 @@ ws_actions!(
 );
 
 fn menu(name: &'static str, items: Vec<MenuItem>) -> Menu {
-    Menu { name: SharedString::new_static(name), items }
+    Menu {
+        name: SharedString::new_static(name),
+        items,
+    }
 }
 
 /// The native menu bar, grouped like a full database client. Application-level
@@ -195,7 +199,8 @@ fn menus() -> Vec<Menu> {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        theme::build(ColorScheme::Dark).init(cx);
+        let settings = host::Host::new().settings();
+        theme::build(theme::scheme(&settings.theme, cx)).init(cx);
 
         cx.bind_keys([
             KeyBinding::new("cmd-n", NewConnection, None),
@@ -223,12 +228,25 @@ fn main() {
                 window_min_size: Some(size(px(720.0), px(480.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some(format!("Tables v{}", env!("CARGO_PKG_VERSION")).into()),
-                    ..Default::default()
+                    appears_transparent: cfg!(target_os = "macos"),
+                    traffic_light_position: Some(gpui::point(px(12.0), px(11.0))),
                 }),
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: WindowBackgroundAppearance::Opaque,
                 ..Default::default()
             },
-            |_, cx| cx.new(root::Root::new),
+            |window, cx| {
+                let root = cx.new(root::Root::new);
+                window
+                    .observe_window_appearance(|_, cx| {
+                        let state = state::AppState::get(cx);
+                        if state.settings.read(cx).theme == "auto" {
+                            theme::build(theme::scheme("auto", cx)).init(cx);
+                            cx.refresh_windows();
+                        }
+                    })
+                    .detach();
+                root
+            },
         )
         .unwrap();
         cx.activate(true);

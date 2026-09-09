@@ -44,3 +44,5 @@ pub use dialect::Dialect;
 pub use engine::{create, Adapter};
 pub use health::HealthMonitor;
 pub use registry::{Registry, SharedAdapter};
+
+mod statement;

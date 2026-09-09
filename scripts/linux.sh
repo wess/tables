@@ -33,7 +33,7 @@ mkdir -p "$out"
 
 # --- build ----------------------------------------------------------------
 rustup target add "$triple" >/dev/null 2>&1 || true
-cargo build --release -p app --target "$triple"
+cargo build --locked --release -p app -p tablesmcp --target "$triple"
 # The cargo bin target is `tablesdev`; it's installed as `tables` below.
 bin="target/$triple/release/tablesdev"
 strip "$bin" 2>/dev/null || true
@@ -42,6 +42,7 @@ strip "$bin" 2>/dev/null || true
 appdir="$out/AppDir"
 mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/pixmaps"
 cp "$bin" "$appdir/usr/bin/tables"
+cp "target/$triple/release/tablesmcp" "$appdir/usr/bin/tablesmcp"
 cp assets/tables.desktop "$appdir/usr/share/applications/tables.desktop"
 # 512px icon: linuxdeploy only accepts standard icon sizes (<=512), not the
 # 1024px master.

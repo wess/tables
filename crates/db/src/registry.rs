@@ -19,19 +19,36 @@ pub type SharedAdapter = Arc<dyn Adapter>;
 
 #[derive(Default)]
 pub struct Registry {
-    adapters: Mutex<HashMap<String, SharedAdapter>>,
+    adapters: Mutex<HashMap<String, (SharedAdapter, bool)>>,
+    lifecycle: AsyncMutex<()>,
     tunnels: AsyncMutex<Tunnels>,
 }
 
 impl Registry {
     /// Connect a configured connection. No-op when already connected. SSH tunnel
     /// first (non-sqlite, when enabled), then the adapter, then startup commands
-    /// — each command's failure silently ignored.
+    /// — a failed startup command fails the connection.
     pub async fn connect(&self, config: &ConnectionConfig) -> Result<(), String> {
-        if self.adapters.lock().unwrap().contains_key(&config.id) {
-            return Ok(());
+        self.connect_mode(config, false).await
+    }
+
+    pub async fn connect_readonly(&self, config: &ConnectionConfig) -> Result<(), String> {
+        self.connect_mode(config, true).await
+    }
+
+    async fn connect_mode(&self, config: &ConnectionConfig, read_only: bool) -> Result<(), String> {
+        let _guard = self.lifecycle.lock().await;
+        if let Some((_, mode)) = self.adapters.lock().unwrap().get(&config.id) {
+            return if *mode == read_only {
+                Ok(())
+            } else {
+                Err("Disconnect before changing the connection's read-only mode".into())
+            };
         }
         let mut config = config.clone();
+        if read_only {
+            config.startup_commands = None;
+        }
         let wants_tunnel =
             config.kind != "sqlite" && config.ssh.as_ref().is_some_and(|ssh| ssh.enabled);
         if wants_tunnel {
@@ -50,7 +67,11 @@ impl Registry {
         // registered must close it so no SSH child is leaked. Startup-command
         // failures are surfaced (not silent) and fail the connection.
         let setup = async {
-            let adapter = engine::create(&config)?;
+            let adapter = if read_only {
+                engine::create_readonly(&config)?
+            } else {
+                engine::create(&config)?
+            };
             adapter.connect().await?;
             if let Some(commands) = &config.startup_commands {
                 for command in commands.lines().map(str::trim).filter(|c| !c.is_empty()) {
@@ -76,15 +97,16 @@ impl Registry {
         self.adapters
             .lock()
             .unwrap()
-            .insert(config.id.clone(), adapter.clone());
+            .insert(config.id.clone(), (adapter, read_only));
         Ok(())
     }
 
     /// Disconnect and drop the adapter, then close the tunnel — always, even
     /// when no adapter was live.
     pub async fn disconnect(&self, id: &str) {
+        let _guard = self.lifecycle.lock().await;
         let adapter = self.adapters.lock().unwrap().remove(id);
-        if let Some(adapter) = adapter {
+        if let Some((adapter, _)) = adapter {
             adapter.disconnect().await;
         }
         self.tunnels.lock().await.close(id).await;
@@ -96,7 +118,7 @@ impl Registry {
             .lock()
             .unwrap()
             .get(id)
-            .cloned()
+            .map(|(adapter, _)| adapter.clone())
             .ok_or_else(|| format!("No active connection: {id}"))
     }
 

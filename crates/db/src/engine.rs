@@ -18,6 +18,19 @@ pub trait Adapter: Send + Sync {
     async fn connect(&self) -> Result<(), String>;
     async fn disconnect(&self);
     async fn query(&self, sql: &str) -> Result<RawResult, String>;
+    /// Decode incrementally, rejecting results beyond the caller's budget.
+    async fn query_bounded(
+        &self,
+        sql: &str,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<RawResult, String>;
+    /// Stream one result through a bounded channel. Dropping the receiver stops the read.
+    async fn stream_rows(
+        &self,
+        sql: &str,
+        tx: tokio::sync::mpsc::Sender<model::Row>,
+    ) -> Result<(), String>;
     /// Execute a statement with bound parameters (values sent as typed binds,
     /// never interpolated). Reads return rows; writes return the affected count.
     /// Placeholders are engine-specific — build the SQL with `Dialect::placeholder`.
@@ -42,6 +55,20 @@ pub fn create(config: &ConnectionConfig) -> Result<Arc<dyn Adapter>, String> {
         "postgres" => Ok(Arc::new(super::postgres::PostgresAdapter::new(config))),
         "mysql" => Ok(Arc::new(super::mysql::MysqlAdapter::new(config))),
         "sqlite" => Ok(Arc::new(super::sqlite::SqliteAdapter::new(config))),
+        other => Err(format!("Unsupported database type: {other}")),
+    }
+}
+
+/// Open an inspection connection with writes disabled by the engine.
+pub fn create_readonly(config: &ConnectionConfig) -> Result<Arc<dyn Adapter>, String> {
+    match config.kind.as_str() {
+        "postgres" => Ok(Arc::new(
+            super::postgres::PostgresAdapter::new(config).readonly(),
+        )),
+        "mysql" => Ok(Arc::new(super::mysql::MysqlAdapter::new(config).readonly())),
+        "sqlite" => Ok(Arc::new(
+            super::sqlite::SqliteAdapter::new(config).readonly(),
+        )),
         other => Err(format!("Unsupported database type: {other}")),
     }
 }

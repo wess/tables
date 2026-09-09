@@ -15,9 +15,10 @@ const KEYCHAIN_FLAG: &str = "secretInKeychain";
 
 pub struct Host {
     pub(crate) registry: Arc<Registry>,
-    pub(crate) health: HealthMonitor,
+    pub(crate) health: Arc<HealthMonitor>,
     /// The active connection id.
     active: Mutex<Option<String>>,
+    pub(crate) approval: Mutex<Option<tokio::sync::mpsc::Sender<crate::WriteApproval>>>,
     /// `(connection, table) → column-type map`, memoized to avoid re-introspecting
     /// on every filtered page turn and row write. Cleared whenever a statement
     /// runs or the connection changes, so a cast can't outlive a schema change
@@ -35,10 +36,22 @@ impl Host {
     pub fn new() -> Self {
         Host {
             registry: Arc::new(Registry::default()),
-            health: HealthMonitor::default(),
+            health: Arc::new(HealthMonitor::default()),
             active: Mutex::new(None),
+            approval: Mutex::new(None),
             col_types_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Keep a workspace's cursor independent from navigation in other workspaces.
+    pub fn scoped(&self, id: &str) -> Arc<Self> {
+        Arc::new(Host {
+            registry: self.registry.clone(),
+            health: self.health.clone(),
+            active: Mutex::new(Some(id.to_string())),
+            approval: Mutex::new(None),
+            col_types_cache: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Column types for `table` on the active connection, memoized. Postgres
@@ -52,12 +65,18 @@ impl Host {
         if dialect != Dialect::Postgres {
             return HashMap::new();
         }
-        let key = (self.active_connection_id().unwrap_or_default(), table.to_string());
+        let key = (
+            self.active_connection_id().unwrap_or_default(),
+            table.to_string(),
+        );
         if let Some(hit) = self.col_types_cache.lock().unwrap().get(&key).cloned() {
             return hit;
         }
         let types = pg_col_types(&adapter, dialect, table).await;
-        self.col_types_cache.lock().unwrap().insert(key, types.clone());
+        self.col_types_cache
+            .lock()
+            .unwrap()
+            .insert(key, types.clone());
         types
     }
 
@@ -108,7 +127,8 @@ impl Host {
             && keychain::set_secret(&conn.id, &conn.password).is_ok()
         {
             conn.password = String::new();
-            conn.extra.insert(KEYCHAIN_FLAG.into(), serde_json::Value::Bool(true));
+            conn.extra
+                .insert(KEYCHAIN_FLAG.into(), serde_json::Value::Bool(true));
         }
         connections::upsert(&conn)
     }
@@ -138,7 +158,11 @@ impl Host {
         let adapter = match db::create(&config) {
             Ok(adapter) => adapter,
             Err(error) => {
-                return ConnectionTestResult { ok: false, version: None, error: Some(error) }
+                return ConnectionTestResult {
+                    ok: false,
+                    version: None,
+                    error: Some(error),
+                }
             }
         };
         let probe = async {
@@ -149,8 +173,16 @@ impl Host {
         }
         .await;
         match probe {
-            Ok(version) => ConnectionTestResult { ok: true, version: Some(version), error: None },
-            Err(error) => ConnectionTestResult { ok: false, version: None, error: Some(error) },
+            Ok(version) => ConnectionTestResult {
+                ok: true,
+                version: Some(version),
+                error: None,
+            },
+            Err(error) => ConnectionTestResult {
+                ok: false,
+                version: None,
+                error: Some(error),
+            },
         }
     }
 
@@ -169,11 +201,17 @@ impl Host {
                 // Migrate: blank the plaintext only after the keychain write.
                 let mut migrated = conn.clone();
                 migrated.password = String::new();
-                migrated.extra.insert(KEYCHAIN_FLAG.into(), serde_json::Value::Bool(true));
+                migrated
+                    .extra
+                    .insert(KEYCHAIN_FLAG.into(), serde_json::Value::Bool(true));
                 let _ = connections::upsert(&migrated);
             }
         }
-        self.registry.connect(&conn.config()).await?;
+        if conn.safe_mode.as_deref() == Some("readonly") {
+            self.registry.connect_readonly(&conn.config()).await?;
+        } else {
+            self.registry.connect(&conn.config()).await?;
+        }
         self.set_active(id);
         self.health.start(id.to_string(), self.registry.clone());
         Ok(true)
@@ -217,10 +255,13 @@ pub(crate) async fn pg_col_types(
 /// strings parse, anything else is 0.
 pub(crate) fn row_i64(row: &Row, key: &str) -> i64 {
     match row.get(key) {
-        Some(serde_json::Value::Number(n)) => {
-            n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)).unwrap_or(0)
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f as i64))
+            .unwrap_or(0),
+        Some(serde_json::Value::String(s)) => {
+            s.trim().parse::<f64>().map(|f| f as i64).unwrap_or(0)
         }
-        Some(serde_json::Value::String(s)) => s.trim().parse::<f64>().map(|f| f as i64).unwrap_or(0),
         _ => 0,
     }
 }
@@ -294,21 +335,30 @@ mod tests {
         host.connect("e2e").await.unwrap();
 
         // Seed schema + rows through the query path.
-        host.execute_query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)")
-            .await
-            .unwrap();
-        host.execute_query("INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25), ('Charlie', 35)")
-            .await
-            .unwrap();
+        host.execute_query(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)",
+        )
+        .await
+        .unwrap();
+        host.execute_query(
+            "INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25), ('Charlie', 35)",
+        )
+        .await
+        .unwrap();
 
         // Browse tables (also makes the connection active).
         let tables = host.list_tables("e2e").await.unwrap();
-        assert!(tables.iter().any(|t| t.name == "users" && t.kind == "table"));
+        assert!(tables
+            .iter()
+            .any(|t| t.name == "users" && t.kind == "table"));
 
         // Structure introspection.
         let structure = host.table_structure("users").await.unwrap();
         assert_eq!(structure.columns.len(), 3);
-        assert!(structure.columns.iter().any(|c| c.name == "id" && c.is_primary_key));
+        assert!(structure
+            .columns
+            .iter()
+            .any(|c| c.name == "id" && c.is_primary_key));
 
         // Paged rows with a sort.
         let rows = host
@@ -316,7 +366,10 @@ mod tests {
                 table: "users".into(),
                 page: 1,
                 page_size: 10,
-                sort: Some(model::SortSpec { column: "age".into(), direction: "asc".into() }),
+                sort: Some(model::SortSpec {
+                    column: "age".into(),
+                    direction: "asc".into(),
+                }),
                 filters: None,
                 filter_logic: None,
             })
@@ -372,12 +425,28 @@ mod tests {
 
         // Create a table, add a column, and index it.
         let cols = vec![
-            model::NewColumn { name: "id".into(), data_type: "INTEGER".into(), nullable: false, primary_key: true, default_value: None },
-            model::NewColumn { name: "name".into(), data_type: "TEXT".into(), nullable: true, primary_key: false, default_value: None },
+            model::NewColumn {
+                name: "id".into(),
+                data_type: "INTEGER".into(),
+                nullable: false,
+                primary_key: true,
+                default_value: None,
+            },
+            model::NewColumn {
+                name: "name".into(),
+                data_type: "TEXT".into(),
+                nullable: true,
+                primary_key: false,
+                default_value: None,
+            },
         ];
         host.create_table("people", &cols).await.unwrap();
-        host.add_column("people", "age", "INTEGER", true, Some("0")).await.unwrap();
-        host.create_index("people", "people_name", &["name".into()], false).await.unwrap();
+        host.add_column("people", "age", "INTEGER", true, Some("0"))
+            .await
+            .unwrap();
+        host.create_index("people", "people_name", &["name".into()], false)
+            .await
+            .unwrap();
 
         let structure = host.table_structure("people").await.unwrap();
         assert_eq!(structure.columns.len(), 3, "id, name, age");
@@ -385,9 +454,14 @@ mod tests {
         assert!(structure.indexes.iter().any(|i| i.name == "people_name"));
 
         // Seed a row and back the database up.
-        host.execute_query("INSERT INTO people (name, age) VALUES ('Ada', 40)").await.unwrap();
+        host.execute_query("INSERT INTO people (name, age) VALUES ('Ada', 40)")
+            .await
+            .unwrap();
         let backup = dir.join("dump.sql");
-        let tables = host.backup_database(backup.to_str().unwrap()).await.unwrap();
+        let tables = host
+            .backup_database(backup.to_str().unwrap())
+            .await
+            .unwrap();
         assert!(tables >= 1);
         let dump = std::fs::read_to_string(&backup).unwrap();
         assert!(dump.contains("people"));
@@ -431,8 +505,14 @@ mod tests {
         bad.insert("id".into(), serde_json::json!(2));
         bad.insert("name".into(), serde_json::Value::Null);
         let writes = vec![
-            RowWrite::Insert { table: "t".into(), row: good },
-            RowWrite::Insert { table: "t".into(), row: bad },
+            RowWrite::Insert {
+                table: "t".into(),
+                row: good,
+            },
+            RowWrite::Insert {
+                table: "t".into(),
+                row: bad,
+            },
         ];
         assert!(host.apply_row_writes(&writes).await.is_err());
 

@@ -33,8 +33,11 @@ impl Sidebar {
         watch(cx, &state.tables_error);
         watch(cx, &state.active_table);
 
-        let search =
-            cx.new(|cx| TextInput::new(cx).placeholder("Filter tables…").size(Size::Xs));
+        let search = cx.new(|cx| {
+            TextInput::new(cx)
+                .placeholder("Filter tables…")
+                .size(Size::Xs)
+        });
         // Re-render as the filter text changes.
         cx.subscribe(&search, |_this, _input, event: &TextInputEvent, cx| {
             if let TextInputEvent::Change(_) = event {
@@ -43,30 +46,45 @@ impl Sidebar {
         })
         .detach();
 
-        Sidebar { app, state, search, menu: None, edit: None, confirm_drop: None }
+        Sidebar {
+            app,
+            state,
+            search,
+            menu: None,
+            edit: None,
+            confirm_drop: None,
+        }
     }
 
     // --- create / drop table -------------------------------------------------
 
     pub(super) fn open_create_table(&mut self, cx: &mut Context<Self>) {
         let modal = cx.new(StructEditModal::create_table);
-        cx.subscribe(&modal, |this, _m, event: &StructEditEvent, cx| match event {
-            StructEditEvent::Cancel => {
-                this.edit = None;
-                cx.notify();
-            }
-            StructEditEvent::Submit(EditOp::CreateTable { name, columns }) => {
-                this.run_create_table(name.clone(), columns.clone(), cx);
-            }
-            // The create-table modal only ever emits CreateTable.
-            StructEditEvent::Submit(_) => {}
-        })
+        cx.subscribe(
+            &modal,
+            |this, _m, event: &StructEditEvent, cx| match event {
+                StructEditEvent::Cancel => {
+                    this.edit = None;
+                    cx.notify();
+                }
+                StructEditEvent::Submit(EditOp::CreateTable { name, columns }) => {
+                    this.run_create_table(name.clone(), columns.clone(), cx);
+                }
+                // The create-table modal only ever emits CreateTable.
+                StructEditEvent::Submit(_) => {}
+            },
+        )
         .detach();
         self.edit = Some(modal);
         cx.notify();
     }
 
-    fn run_create_table(&mut self, name: String, columns: Vec<model::NewColumn>, cx: &mut Context<Self>) {
+    fn run_create_table(
+        &mut self,
+        name: String,
+        columns: Vec<model::NewColumn>,
+        cx: &mut Context<Self>,
+    ) {
         self.edit = None;
         cx.notify();
         let host = self.app.host.clone();
@@ -126,7 +144,9 @@ impl Sidebar {
         // Copy `sql` to the clipboard and toast; shared by every item.
         let copy = move |label: &'static str, sql: String, cx: &mut gpui::App| {
             cx.write_to_clipboard(ClipboardItem::new_string(sql));
-            AppState::get(cx).toasts.success(cx, &format!("{label} copied"), 1200);
+            AppState::get(cx)
+                .toasts
+                .success(cx, &format!("{label} copied"), 1200);
         };
 
         let menu = cx.new(|cx| {
@@ -139,11 +159,9 @@ impl Sidebar {
                 }
             });
             let m = m.item("Copy INSERT", {
-                let (host, t, copy, toasts) =
-                    (host.clone(), t.clone(), copy, toasts.clone());
+                let (host, t, copy, toasts) = (host.clone(), t.clone(), copy, toasts.clone());
                 move |_w, cx| {
-                    let (host, t, copy, toasts) =
-                        (host.clone(), t.clone(), copy, toasts.clone());
+                    let (host, t, copy, toasts) = (host.clone(), t.clone(), copy, toasts.clone());
                     bridge::run(
                         cx,
                         async move { host.generate_insert_template(&t).await },
@@ -155,11 +173,9 @@ impl Sidebar {
                 }
             });
             let m = m.item("Copy CREATE", {
-                let (host, t, copy, toasts) =
-                    (host.clone(), t.clone(), copy, toasts.clone());
+                let (host, t, copy, toasts) = (host.clone(), t.clone(), copy, toasts.clone());
                 move |_w, cx| {
-                    let (host, t, copy, toasts) =
-                        (host.clone(), t.clone(), copy, toasts.clone());
+                    let (host, t, copy, toasts) = (host.clone(), t.clone(), copy, toasts.clone());
                     bridge::run(
                         cx,
                         async move { host.table_ddl(&t).await },
@@ -204,16 +220,23 @@ impl Sidebar {
         if objects.is_empty() {
             return None;
         }
+        let colors = crate::theme::palette(cx);
         let section = Stack::new().gap(Size::Xs).child(
-            div()
-                .px(px(6.0))
-                .child(Text::new(format!("{label} · {}", objects.len())).size(Size::Xs).dimmed()),
+            div().px(px(6.0)).child(
+                Text::new(format!("{label} · {}", objects.len()))
+                    .size(Size::Xs)
+                    .dimmed(),
+            ),
         );
-        let mut list = Stack::new().gap(Size::Xs);
+        let mut list = div().flex().flex_col().gap(px(2.0));
         for table in objects {
             let name = table.name.clone();
             let is_active = active == Some(name.as_str());
-            let icon = if table.kind == "view" { "◇" } else { "▤" };
+            let icon = if table.kind == "view" {
+                IconName::PanelsTopLeft
+            } else {
+                IconName::Table2
+            };
             let for_click = name.clone();
             let for_menu = name.clone();
             list = list.child(
@@ -225,13 +248,25 @@ impl Sidebar {
                             this.open_table_menu(&for_menu, ev.position, window, cx);
                         }),
                     )
+                    .flex()
+                    .items_center()
+                    .h(px(30.0))
+                    .px(px(8.0))
+                    .gap(px(8.0))
+                    .rounded(px(3.0))
+                    .cursor_pointer()
+                    .when(is_active, |row| row.bg(colors.bg_muted))
+                    .hover(move |row| row.bg(colors.tab_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.select_table(cx, &for_click);
+                    }))
+                    .child(Icon::new(icon).size(Size::Xs))
                     .child(
-                        NavLink::new(SharedString::from(format!("tbl-{name}")), name.clone())
-                            .icon(icon)
-                            .active(is_active)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.select_table(cx, &for_click);
-                            })),
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(Text::new(name).size(Size::Xs)),
                     ),
             );
         }
@@ -285,8 +320,16 @@ impl Render for Sidebar {
             .iter()
             .filter(|t| query.is_empty() || t.name.to_lowercase().contains(&query))
             .collect();
-        let base: Vec<&TableInfo> = matched.iter().copied().filter(|t| t.kind != "view").collect();
-        let views: Vec<&TableInfo> = matched.iter().copied().filter(|t| t.kind == "view").collect();
+        let base: Vec<&TableInfo> = matched
+            .iter()
+            .copied()
+            .filter(|t| t.kind != "view")
+            .collect();
+        let views: Vec<&TableInfo> = matched
+            .iter()
+            .copied()
+            .filter(|t| t.kind == "view")
+            .collect();
 
         let body: gpui::AnyElement = if matched.is_empty() {
             div()
@@ -295,10 +338,10 @@ impl Render for Sidebar {
                 .into_any_element()
         } else {
             let mut list = Stack::new().gap(Size::Sm);
-            if let Some(g) = self.group("TABLES", &base, active.as_deref(), cx) {
+            if let Some(g) = self.group("Tables", &base, active.as_deref(), cx) {
                 list = list.child(g);
             }
-            if let Some(g) = self.group("VIEWS", &views, active.as_deref(), cx) {
+            if let Some(g) = self.group("Views", &views, active.as_deref(), cx) {
                 list = list.child(g);
             }
             list.into_any_element()
@@ -321,7 +364,8 @@ impl Render for Sidebar {
                     .border_color(colors.border)
                     .child(div().flex_1().min_w(px(0.0)).child(self.search.clone()))
                     .child(
-                        ActionIcon::new("sb-new-table", "＋")
+                        ActionIcon::new("sb-new-table", IconName::Plus)
+                            .label("Create table")
                             .size(Size::Sm)
                             .variant(Variant::Subtle)
                             .on_click(cx.listener(|this, _, _, cx| this.open_create_table(cx))),

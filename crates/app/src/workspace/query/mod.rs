@@ -65,7 +65,11 @@ impl QueryPanel {
                 .rows(10)
                 .placeholder("SELECT * FROM …   (⌘⏎ to run)")
         });
-        let fav_name = cx.new(|cx| TextInput::new(cx).placeholder("Favorite name").size(Size::Xs));
+        let fav_name = cx.new(|cx| {
+            TextInput::new(cx)
+                .placeholder("Favorite name")
+                .size(Size::Xs)
+        });
         let results = Signal::new(cx, Vec::new());
         let running = Signal::new(cx, false);
         let side = Signal::new(cx, None);
@@ -89,14 +93,17 @@ impl QueryPanel {
             );
         }
 
-        cx.subscribe(&editor, |this, editor, event: &EditorEvent, cx| match event {
-            EditorEvent::Run(_) => {
-                let sql = editor.read(cx).text();
-                this.completions.clear();
-                this.run(sql, cx);
-            }
-            EditorEvent::Change(_) => this.update_completions(cx),
-        })
+        cx.subscribe(
+            &editor,
+            |this, editor, event: &EditorEvent, cx| match event {
+                EditorEvent::Run(_) => {
+                    let sql = editor.read(cx).text();
+                    this.completions.clear();
+                    this.run(sql, cx);
+                }
+                EditorEvent::Change(_) => this.update_completions(cx),
+            },
+        )
         .detach();
 
         QueryPanel {
@@ -153,12 +160,14 @@ impl QueryPanel {
 
     /// Load SQL into the editor without running it (assistant "Insert").
     pub fn set_sql(&self, sql: &str, cx: &mut gpui::App) {
-        self.editor.update(cx, |editor, cx| editor.set_text(sql, cx));
+        self.editor
+            .update(cx, |editor, cx| editor.set_text(sql, cx));
     }
 
     /// Load SQL into the editor and run it immediately (assistant "Run").
     pub fn run_sql(&self, sql: String, cx: &mut gpui::App) {
-        self.editor.update(cx, |editor, cx| editor.set_text(&sql, cx));
+        self.editor
+            .update(cx, |editor, cx| editor.set_text(&sql, cx));
         self.run(sql, cx);
     }
 
@@ -171,7 +180,7 @@ impl QueryPanel {
     /// Run the editor's statements atomically (all-or-nothing).
     pub fn run_transaction(&self, cx: &mut gpui::App) {
         let sql = self.editor.read(cx).text();
-        if sql.trim().is_empty() {
+        if sql.trim().is_empty() || self.running.get(cx) {
             return;
         }
         self.running.set(cx, true);
@@ -187,7 +196,11 @@ impl QueryPanel {
                 running.set(cx, false);
                 match outcome {
                     Ok(affected) => {
-                        toasts.success(cx, &format!("Committed · {affected} row(s) affected"), 2000);
+                        toasts.success(
+                            cx,
+                            &format!("Committed · {affected} row(s) affected"),
+                            2000,
+                        );
                         if ddl {
                             state.bump_tables(cx);
                         }
@@ -201,7 +214,7 @@ impl QueryPanel {
     /// Reformat the editor's SQL in place.
     pub fn format_current(&self, cx: &mut gpui::App) {
         let sql = self.editor.read(cx).text();
-        if sql.trim().is_empty() {
+        if sql.trim().is_empty() || self.running.get(cx) {
             return;
         }
         let formatted = format::format_sql(&sql);
@@ -211,7 +224,7 @@ impl QueryPanel {
     /// Run the planner for the editor's SQL and show the plan in the results.
     pub fn explain_current(&self, cx: &mut gpui::App) {
         let sql = self.editor.read(cx).text();
-        if sql.trim().is_empty() {
+        if sql.trim().is_empty() || self.running.get(cx) {
             return;
         }
         self.running.set(cx, true);
@@ -233,7 +246,7 @@ impl QueryPanel {
     }
 
     fn run(&self, sql: String, cx: &mut gpui::App) {
-        if sql.trim().is_empty() {
+        if sql.trim().is_empty() || self.running.get(cx) {
             return;
         }
         self.running.set(cx, true);
@@ -302,7 +315,11 @@ impl QueryPanel {
                     })),
             );
         }
-        deferred(anchored().position(point(caret.x, caret.y + px(line_h))).child(list))
+        deferred(
+            anchored()
+                .position(point(caret.x, caret.y + px(line_h)))
+                .child(list),
+        )
     }
 
     fn open_chart(&mut self, cx: &mut Context<Self>) {
@@ -333,93 +350,97 @@ impl Render for QueryPanel {
         let colors = crate::theme::palette(cx);
         let running = *self.running.read(cx);
         let side = *self.side.read(cx);
-        let has_chartable = self
+        let has_sql = !self.editor.read(cx).text().trim().is_empty();
+        let has_results = self
             .results
             .read(cx)
             .iter()
-            .any(|r| !r.columns.is_empty() && !r.rows.is_empty());
-
+            .any(|result| !result.rows.is_empty());
         let toolbar = div()
             .flex()
             .flex_none()
             .items_center()
-            .justify_between()
+            .h(px(40.0))
             .px(px(8.0))
-            .py(px(6.0))
+            .gap(px(4.0))
+            .bg(colors.bg_subtle)
             .border_b_1()
             .border_color(colors.border)
             .child(
-                Group::new()
-                    .gap(Size::Xs)
-                    .align(Align::Center)
-                    .child(
-                        Button::new("query-run", if running { "Running…" } else { "Run" })
-                            .size(Size::Xs)
-                            .disabled(running || self.editor.read(cx).text().trim().is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let sql = this.editor.read(cx).text();
-                                this.run(sql, cx);
-                            })),
-                    )
-                    .child(Text::new("⌘⏎").size(Size::Xs).dimmed())
-                    .child(
-                        Button::new("query-explain", "Explain")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .disabled(running || self.editor.read(cx).text().trim().is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.explain_current(cx))),
-                    )
-                    .child(
-                        Button::new("query-format", "Format")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .disabled(self.editor.read(cx).text().trim().is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.format_current(cx))),
-                    )
-                    .child(
-                        Button::new("query-tx", "⚛ Tx")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .disabled(running || self.editor.read(cx).text().trim().is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.run_transaction(cx))),
-                    ),
+                Button::new("query-run", if running { "Running…" } else { "Run SQL" })
+                    .size(Size::Xs)
+                    .disabled(running || self.editor.read(cx).text().trim().is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let sql = this.editor.read(cx).text();
+                        this.run(sql, cx);
+                    })),
             )
             .child(
-                Group::new()
-                    .gap(Size::Xs)
-                    .child(
-                        Button::new("query-chart", "Chart")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .disabled(!has_chartable)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_chart(cx))),
-                    )
-                    .child(
-                        Button::new("query-export", "Export")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .disabled(!has_chartable)
-                            .on_click(cx.listener(|this, _, _, cx| this.export_results(cx))),
-                    )
-                    .child(
-                        Button::new("query-copy-md", "Copy MD")
-                            .size(Size::Xs)
-                            .variant(Variant::Subtle)
-                            .disabled(!has_chartable)
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_results_markdown(cx))),
-                    )
-                    .child(
-                        Button::new("query-history", "History")
-                            .size(Size::Xs)
-                            .variant(if side == Some(Side::History) { Variant::Light } else { Variant::Subtle })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_side(Side::History, cx))),
-                    )
-                    .child(
-                        Button::new("query-favorites", "Favorites")
-                            .size(Size::Xs)
-                            .variant(if side == Some(Side::Favorites) { Variant::Light } else { Variant::Subtle })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_side(Side::Favorites, cx))),
-                    ),
+                ActionIcon::new("query-format", IconName::AlignLeft)
+                    .size(Size::Sm)
+                    .label("Format SQL (⌘⇧F)")
+                    .disabled(self.editor.read(cx).text().trim().is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| this.format_current(cx))),
+            )
+            .child(div().flex_1())
+            .child(
+                ActionIcon::new("query-history", IconName::History)
+                    .size(Size::Sm)
+                    .label("Query history")
+                    .variant(if side == Some(Side::History) {
+                        Variant::Light
+                    } else {
+                        Variant::Subtle
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_side(Side::History, cx))),
+            )
+            .child(
+                ActionIcon::new("query-favorites", IconName::Bookmark)
+                    .size(Size::Sm)
+                    .label("Saved queries")
+                    .variant(if side == Some(Side::Favorites) {
+                        Variant::Light
+                    } else {
+                        Variant::Subtle
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_side(Side::Favorites, cx))),
+            )
+            .child(div().w(px(1.0)).h(px(18.0)).mx(px(4.0)).bg(colors.border))
+            .child(
+                ActionIcon::new("query-explain", IconName::ScanSearch)
+                    .size(Size::Sm)
+                    .label("Explain query")
+                    .disabled(running || !has_sql)
+                    .on_click(cx.listener(|this, _, _, cx| this.explain_current(cx))),
+            )
+            .child(
+                ActionIcon::new("query-transaction", IconName::ShieldCheck)
+                    .size(Size::Sm)
+                    .label("Run in transaction")
+                    .disabled(running || !has_sql)
+                    .on_click(cx.listener(|this, _, _, cx| this.run_transaction(cx))),
+            )
+            .child(div().w(px(1.0)).h(px(18.0)).mx(px(4.0)).bg(colors.border))
+            .child(
+                ActionIcon::new("query-chart", IconName::ChartColumn)
+                    .size(Size::Sm)
+                    .label("Chart results…")
+                    .disabled(running || !has_results)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_chart(cx))),
+            )
+            .child(
+                ActionIcon::new("query-export", IconName::Download)
+                    .size(Size::Sm)
+                    .label("Export results…")
+                    .disabled(running || !has_results)
+                    .on_click(cx.listener(|this, _, _, cx| this.export_results(cx))),
+            )
+            .child(
+                ActionIcon::new("query-copy", IconName::Copy)
+                    .size(Size::Sm)
+                    .label("Copy results as Markdown")
+                    .disabled(running || !has_results)
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_results_markdown(cx))),
             );
 
         let editor_pane = div()
@@ -431,7 +452,11 @@ impl Render for QueryPanel {
         let results = self.results.read(cx);
         let result_pane = if results.is_empty() {
             Center::new()
-                .child(Text::new("Run a query to see results").size(Size::Sm).dimmed())
+                .child(
+                    Text::new("Run a query to see results")
+                        .size(Size::Sm)
+                        .dimmed(),
+                )
                 .into_any_element()
         } else {
             let multi = results.len() > 1;

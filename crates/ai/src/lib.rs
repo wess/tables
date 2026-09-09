@@ -8,6 +8,7 @@
 
 mod anthropic;
 mod config;
+mod sse;
 
 pub use anthropic::stream_chat;
 pub use config::{

@@ -10,8 +10,11 @@ use serde_json::{Map, Value};
 use crate::paths;
 use model::{InstalledPlugin, PluginManifest};
 
+static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const CONFIG: &str = "plugins.json";
-const REGISTRY_URL: &str = "https://raw.githubusercontent.com/tables-app/plugins/main/registry.json";
+const REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/tables-app/plugins/main/registry.json";
 
 fn dir() -> PathBuf {
     let d = paths::tables_dir().join("plugins");
@@ -55,6 +58,7 @@ pub fn list() -> Vec<InstalledPlugin> {
 
 /// Set `config[name] = enabled`.
 pub fn toggle(name: &str, enabled: bool) -> bool {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut config = config();
     config.insert(name.into(), Value::Bool(enabled));
     paths::write_json(CONFIG, &config).is_ok()
@@ -112,7 +116,10 @@ pub fn install(data: &PluginManifest) -> Result<(), String> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let msg = if stderr.is_empty() {
-                format!("curl exited with code {}", output.status.code().unwrap_or(-1))
+                format!(
+                    "curl exited with code {}",
+                    output.status.code().unwrap_or(-1)
+                )
             } else {
                 stderr
             };
@@ -126,9 +133,17 @@ pub fn install(data: &PluginManifest) -> Result<(), String> {
     if !manifest_path.exists() {
         let manifest = PluginManifest {
             name: data.name.clone(),
-            version: if data.version.is_empty() { "0.1.0".into() } else { data.version.clone() },
+            version: if data.version.is_empty() {
+                "0.1.0".into()
+            } else {
+                data.version.clone()
+            },
             description: data.description.clone(),
-            kind: if data.kind.is_empty() { "driver".into() } else { data.kind.clone() },
+            kind: if data.kind.is_empty() {
+                "driver".into()
+            } else {
+                data.kind.clone()
+            },
             author: None,
             entry: Some("index.ts".into()),
             extra: Map::new(),
@@ -225,6 +240,8 @@ mod tests {
         assert_eq!(list[0].name, "tables-mongodb");
         assert_eq!(list[3].kind, "export");
         assert_eq!(list[5].name, "tables-nord");
-        assert!(list.iter().all(|m| m.version == "0.1.0" && m.author.as_deref() == Some("tables")));
+        assert!(list
+            .iter()
+            .all(|m| m.version == "0.1.0" && m.author.as_deref() == Some("tables")));
     }
 }

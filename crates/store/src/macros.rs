@@ -6,6 +6,8 @@ use serde_json::Value;
 use crate::paths;
 use model::{iso_now, new_uuid, Macro, MacroStep};
 
+static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const FILE: &str = "macros.json";
 
 /// Missing or corrupt file → [].
@@ -22,6 +24,7 @@ pub fn save(
     shortcut: Option<String>,
     created_at: Option<String>,
 ) -> Macro {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let saved = Macro {
         id: id.filter(|s| !s.is_empty()).unwrap_or_else(new_uuid),
         name: name.into(),
@@ -41,6 +44,7 @@ pub fn save(
 
 /// Filter-out; always returns true.
 pub fn remove(id: &str) -> bool {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let list: Vec<Macro> = load().into_iter().filter(|m| m.id != id).collect();
     let _ = paths::write_json(FILE, &list);
     true
@@ -58,6 +62,7 @@ pub fn export(id: &str) -> Result<String, String> {
 /// Parse when given a JSON string; the imported macro always gets a fresh id
 /// and createdAt, then is appended.
 pub fn import(data: &Value) -> Result<Macro, String> {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut value = match data {
         Value::String(text) => serde_json::from_str(text).map_err(|e| e.to_string())?,
         other => other.clone(),
@@ -92,7 +97,14 @@ mod tests {
         testenv(|| {
             let saved = save(None, "m", vec![], None, None, None);
             assert_eq!(saved.id.len(), 36);
-            save(Some(saved.id.clone()), "renamed", vec![], None, None, Some(saved.created_at));
+            save(
+                Some(saved.id.clone()),
+                "renamed",
+                vec![],
+                None,
+                None,
+                Some(saved.created_at),
+            );
             let list = load();
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].name, "renamed");

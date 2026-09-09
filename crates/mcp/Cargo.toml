@@ -1,0 +1,19 @@
+[package]
+name = "tablesmcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+db = { workspace = true }
+store = { workspace = true }
+model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+rmcp = { version = "=2.2.0", default-features = false, features = ["server"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dev-dependencies]
+tempfile = "3"

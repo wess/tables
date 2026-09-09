@@ -5,6 +5,8 @@
 use crate::paths;
 use model::HistoryEntry;
 
+static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const FILE: &str = "history.json";
 const MAX: usize = 500;
 
@@ -14,6 +16,7 @@ pub fn load() -> Result<Vec<HistoryEntry>, String> {
 
 /// Prepend, truncate to 500, write.
 pub fn append(entry: HistoryEntry) -> Result<(), String> {
+    let _guard = MUTATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load()?;
     list.insert(0, entry);
     list.truncate(MAX);

@@ -115,7 +115,11 @@ jobs:
           echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          existing_keychains=()
+          while IFS= read -r existing_keychain; do
+            existing_keychains+=("$existing_keychain")
+          done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//')
+          security list-keychains -d user -s "$KEYCHAIN" "${existing_keychains[@]}"
           rm -f "$RUNNER_TEMP/cert.p12"
 
       - name: Build + bundle (.app)
@@ -155,6 +159,7 @@ jobs:
         run: |
           codesign --verify --strict --verbose=2 dist/Tables.app
           test -x dist/Tables.app/Contents/MacOS/tables
+          test -x dist/Tables.app/Contents/MacOS/tablesmcp
           test -f dist/Tables.app/Contents/Resources/icon.icns
           if [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
             echo "::warning::Ad-hoc build — unsigned and not notarized; Gatekeeper will warn on install."
@@ -200,6 +205,7 @@ jobs:
             file \
             desktop-file-utils \
             libasound2-dev \
+            libdbus-1-dev \
             libfontconfig-dev \
             libssl-dev \
             libvulkan1 \
@@ -312,6 +318,8 @@ jobs:
     needs: [check-version, create-release]
     if: needs.check-version.outputs.changed == 'true'
     runs-on: windows-latest
+    env:
+      TABLES_RELEASE: "1"
     steps:
       - uses: actions/checkout@v5
         with:

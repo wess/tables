@@ -15,6 +15,6 @@ The command palette includes tables and common workspace actions. Open it, type 
 3. Stage related cell changes.
 4. Review the generated SQL once.
 5. Commit the batch.
-6. Move to the Query tab and use `⌘↵` for ad hoc checks.
+6. Move to the SQL editor tab and use `⌘↵` for ad hoc checks.
 
 Native controls also follow standard macOS text navigation, selection, copy, paste, and focus behavior where supported by gpui and guise.

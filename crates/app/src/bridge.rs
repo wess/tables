@@ -18,6 +18,7 @@ pub fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .expect("build tokio runtime")
@@ -48,15 +49,16 @@ pub fn run<T: Send + 'static>(
 /// it. Used by the assistant panel to render tokens live.
 pub fn stream<T, Fut>(
     cx: &mut App,
-    producer: impl FnOnce(mpsc::UnboundedSender<T>) -> Fut + Send + 'static,
+    producer: impl FnOnce(mpsc::Sender<T>) -> Fut + Send + 'static,
     mut on_item: impl FnMut(T, &mut App) + 'static,
     on_done: impl FnOnce(&mut App) + 'static,
-) where
+) -> tokio::task::AbortHandle
+where
     T: Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let (tx, mut rx) = mpsc::unbounded();
-    runtime().spawn(producer(tx));
+    let (tx, mut rx) = mpsc::channel(32);
+    let handle = runtime().spawn(producer(tx)).abort_handle();
     cx.spawn(async move |cx| {
         while let Some(item) = rx.next().await {
             if cx.update(|cx| on_item(item, cx)).is_err() {
@@ -66,4 +68,5 @@ pub fn stream<T, Fut>(
         let _ = cx.update(|cx| on_done(cx));
     })
     .detach();
+    handle
 }

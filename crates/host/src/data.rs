@@ -25,7 +25,9 @@ impl Host {
         let result = if let Some(sql) = sql.filter(|s| !s.is_empty()) {
             adapter.query(sql).await?
         } else if let Some(table) = table.filter(|t| !t.is_empty()) {
-            adapter.query(&format!("SELECT * FROM {}", dialect.quote_ident(table))).await?
+            adapter
+                .query(&format!("SELECT * FROM {}", dialect.quote_ident(table)))
+                .await?
         } else {
             return Err("No table or SQL provided for export".into());
         };
@@ -51,7 +53,13 @@ impl Host {
                 let table = table
                     .filter(|t| !t.is_empty())
                     .ok_or_else(|| "Table name required for SQL export".to_string())?;
-                Ok(insert_statements(dialect, table, &result.columns, &result.rows, false))
+                Ok(insert_statements(
+                    dialect,
+                    table,
+                    &result.columns,
+                    &result.rows,
+                    false,
+                ))
             }
             other => Err(format!("Unknown format: {other}")),
         }
@@ -66,57 +74,18 @@ impl Host {
         path: Option<&str>,
         options: &Map<String, Value>,
     ) -> Result<ExportFileResult, String> {
-        let adapter = self.active_adapter()?;
-        let dialect = adapter.dialect();
-        let result = adapter
-            .query(&format!("SELECT * FROM {}", dialect.quote_ident(table)))
-            .await?;
-
-        let content = match format {
-            "csv" => {
-                let delim = options
-                    .get("delimiter")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(",");
-                let null_as = options.get("nullAs").and_then(Value::as_str).unwrap_or("");
-                let include_headers =
-                    options.get("includeHeaders").and_then(Value::as_bool) != Some(false);
-
-                let mut lines: Vec<String> = Vec::new();
-                if include_headers {
-                    lines.push(
-                        result
-                            .columns
-                            .iter()
-                            .map(|c| csv_field(c, delim))
-                            .collect::<Vec<_>>()
-                            .join(delim),
-                    );
-                }
-                for row in &result.rows {
-                    let cells: Vec<String> = result
-                        .columns
-                        .iter()
-                        .map(|col| match row.get(col) {
-                            None | Some(Value::Null) => null_as.to_string(),
-                            Some(v) => csv_field(&stringify_cell(v), delim),
-                        })
-                        .collect();
-                    lines.push(cells.join(delim));
-                }
-                lines.join("\n")
-            }
-            "json" => serde_json::to_string_pretty(&result.rows).map_err(|e| e.to_string())?,
-            "sql" => insert_statements(dialect, table, &result.columns, &result.rows, true),
-            other => return Err(format!("Unknown export format: {other}")),
-        };
-
         let Some(path) = path.filter(|p| !p.is_empty()) else {
-            return Ok(ExportFileResult { path: None, rows: 0 });
+            return Ok(ExportFileResult {
+                path: None,
+                rows: 0,
+            });
         };
-        std::fs::write(path, content).map_err(|e| e.to_string())?;
-        Ok(ExportFileResult { path: Some(path.to_string()), rows: result.rows.len() as u64 })
+        let adapter = self.active_adapter()?;
+        let rows = crate::export::write(adapter, table, format, path, options).await?;
+        Ok(ExportFileResult {
+            path: Some(path.to_string()),
+            rows,
+        })
     }
 
     /// Serialize an already-fetched result set (columns + rows) to `format`
@@ -130,7 +99,10 @@ impl Host {
         format: &str,
         table: Option<&str>,
     ) -> Result<String, String> {
-        let dialect = self.active_adapter().map(|a| a.dialect()).unwrap_or(Dialect::Sqlite);
+        let dialect = self
+            .active_adapter()
+            .map(|a| a.dialect())
+            .unwrap_or(Dialect::Sqlite);
         match format {
             "csv" | "tsv" => {
                 let delim = if format == "tsv" { "\t" } else { "," };
@@ -181,36 +153,14 @@ impl Host {
     /// Dump the whole database (each base table's DDL followed by its rows as
     /// INSERTs) to `path`. Returns the table count.
     pub async fn backup_database(&self, path: &str) -> Result<u64, String> {
-        let adapter = self.active_adapter()?;
-        let dialect = adapter.dialect();
-        let tables = adapter.get_tables().await?;
-        let mut out = String::from("-- Tables backup\n\n");
-        let mut count = 0u64;
-        for table in tables.iter().filter(|t| t.kind == "table") {
-            if let Ok(ddl) = adapter.get_ddl(&table.name).await {
-                let ddl = ddl.trim().trim_end_matches(';');
-                if !ddl.is_empty() {
-                    out.push_str(ddl);
-                    out.push_str(";\n\n");
-                }
-            }
-            let rows = adapter
-                .query(&format!("SELECT * FROM {}", dialect.quote_ident(&table.name)))
-                .await?;
-            let inserts = insert_statements(dialect, &table.name, &rows.columns, &rows.rows, true);
-            if !inserts.is_empty() {
-                out.push_str(&inserts);
-                out.push_str("\n\n");
-            }
-            count += 1;
-        }
-        std::fs::write(path, out).map_err(|e| e.to_string())?;
-        Ok(count)
+        crate::export::backup(self.active_adapter()?, path).await
     }
 
     /// Run every statement in a `.sql` file in order, stopping at the first
     /// failure. Returns the number of statements that ran.
     pub async fn restore_database(&self, path: &str) -> Result<u64, String> {
+        self.confirm_write(&format!("Restore database from {path}"))
+            .await?;
         let sql = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let adapter = self.active_adapter()?;
         let mut ran = 0u64;
@@ -234,6 +184,7 @@ impl Host {
         sql: Option<&str>,
         path: Option<&str>,
     ) -> Result<ImportSqlResult, String> {
+        self.confirm_write("Import and execute SQL").await?;
         let adapter = self.active_adapter()?;
         let sql = match path.filter(|p| !p.is_empty()) {
             Some(path) => std::fs::read_to_string(path).map_err(|e| e.to_string())?,
@@ -252,7 +203,11 @@ impl Host {
                 error: None,
                 rows_affected: raw.rows_affected,
             },
-            Err(error) => ImportSqlResult { success: false, error: Some(error), rows_affected: 0 },
+            Err(error) => ImportSqlResult {
+                success: false,
+                error: Some(error),
+                rows_affected: 0,
+            },
         })
     }
 
@@ -263,6 +218,8 @@ impl Host {
         csv: &str,
         delimiter: Option<&str>,
     ) -> Result<ImportResult, String> {
+        self.confirm_write(&format!("Import rows into {table}"))
+            .await?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
         let delimiter = delimiter.filter(|d| !d.is_empty()).unwrap_or(",");
@@ -273,6 +230,8 @@ impl Host {
 
     /// Read a CSV/TSV file (tab delimiter for `.tsv`).
     pub async fn import_csv_file(&self, table: &str, path: &str) -> Result<ImportResult, String> {
+        self.confirm_write(&format!("Import rows from {path} into {table}"))
+            .await?;
         let csv = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
@@ -284,6 +243,8 @@ impl Host {
 
     /// Generate and insert fake rows (default 10).
     pub async fn mock_data(&self, table: &str, count: usize) -> Result<ImportResult, String> {
+        self.confirm_write(&format!("Generate rows in {table}"))
+            .await?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
         let columns = adapter.get_columns(table).await?;
@@ -296,8 +257,11 @@ impl Host {
             .iter()
             .filter(|row| !row.is_empty())
             .map(|row| {
-                let cols =
-                    row.keys().map(|k| dialect.quote_ident(k)).collect::<Vec<_>>().join(", ");
+                let cols = row
+                    .keys()
+                    .map(|k| dialect.quote_ident(k))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let vals = row
                     .values()
                     .map(|v| values::literal_bool_kw(dialect, v))
@@ -307,7 +271,11 @@ impl Host {
             })
             .collect();
         let result = run_import(&adapter, statements).await;
-        Ok(ImportResult { inserted: result.inserted, total, error: result.error })
+        Ok(ImportResult {
+            inserted: result.inserted,
+            total,
+            error: result.error,
+        })
     }
 
     /// Diff two live connections' table schemas.
@@ -334,7 +302,11 @@ impl Host {
         let count = adapter
             .query(&format!("SELECT COUNT(*) as total FROM {quoted_table}"))
             .await?;
-        let total_rows = count.rows.first().map(|row| row_i64(row, "total")).unwrap_or(0);
+        let total_rows = count
+            .rows
+            .first()
+            .map(|row| row_i64(row, "total"))
+            .unwrap_or(0);
         let mut profiles = Vec::with_capacity(columns.len());
         for col in &columns {
             profiles.push(profile_column(&adapter, dialect, &quoted_table, col, total_rows).await);
@@ -344,7 +316,7 @@ impl Host {
 }
 
 /// Wrap a value as an unescaped CSV/text cell.
-fn stringify_cell(v: &Value) -> String {
+pub(crate) fn stringify_cell(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
@@ -359,8 +331,22 @@ fn stringify_cell(v: &Value) -> String {
 fn markdown_table(columns: &[String], rows: &[Row]) -> String {
     let esc = |s: &str| s.replace('|', "\\|").replace('\n', " ");
     let mut out = vec![
-        format!("| {} |", columns.iter().map(|c| esc(c)).collect::<Vec<_>>().join(" | ")),
-        format!("| {} |", columns.iter().map(|_| "---").collect::<Vec<_>>().join(" | ")),
+        format!(
+            "| {} |",
+            columns
+                .iter()
+                .map(|c| esc(c))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ),
+        format!(
+            "| {} |",
+            columns
+                .iter()
+                .map(|_| "---")
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ),
     ];
     for row in rows {
         let cells: Vec<String> = columns
@@ -376,8 +362,8 @@ fn markdown_table(columns: &[String], rows: &[Row]) -> String {
 }
 
 /// Quote a CSV field only when it contains the delimiter, a quote, or a newline.
-fn csv_field(s: &str, delim: &str) -> String {
-    if s.contains(delim) || s.contains('"') || s.contains('\n') {
+pub(crate) fn csv_field(s: &str, delim: &str) -> String {
+    if s.contains(delim) || s.contains('"') || s.contains(['\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -386,7 +372,7 @@ fn csv_field(s: &str, delim: &str) -> String {
 
 /// The `INSERT INTO … VALUES …;` block for SQL export. `bool_kw` switches
 /// booleans between `TRUE/FALSE` and quoted strings.
-fn insert_statements(
+pub(crate) fn insert_statements(
     dialect: Dialect,
     table: &str,
     columns: &[String],
@@ -394,7 +380,11 @@ fn insert_statements(
     bool_kw: bool,
 ) -> String {
     let quoted_table = dialect.quote_ident(table);
-    let cols = columns.iter().map(|c| dialect.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let cols = columns
+        .iter()
+        .map(|c| dialect.quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
     rows.iter()
         .map(|row| {
             let vals = columns
@@ -433,7 +423,11 @@ async fn run_import(adapter: &SharedAdapter, statements: Vec<String>) -> ImportR
             }
         }
     }
-    ImportResult { inserted, total, error }
+    ImportResult {
+        inserted,
+        total,
+        error,
+    }
 }
 
 /// Chunked-transactional import of parameterized INSERTs (see `run_import`).
@@ -453,9 +447,12 @@ async fn run_import_params(
             }
         }
     }
-    ImportResult { inserted, total, error }
+    ImportResult {
+        inserted,
+        total,
+        error,
+    }
 }
-
 
 /// `(name, columns)` pairs for the real tables (not views) of a connection.
 async fn table_columns(
@@ -472,9 +469,11 @@ async fn table_columns(
 
 fn is_numeric_type(data_type: &str) -> bool {
     let data_type = data_type.to_lowercase();
-    ["int", "float", "double", "decimal", "numeric", "real", "money", "serial"]
-        .iter()
-        .any(|kind| data_type.contains(kind))
+    [
+        "int", "float", "double", "decimal", "numeric", "real", "money", "serial",
+    ]
+    .iter()
+    .any(|kind| data_type.contains(kind))
 }
 
 /// null/missing becomes `None`.
@@ -497,7 +496,7 @@ async fn profile_column(
     let stats_sql = format!(
         "SELECT COUNT(*) - COUNT({column}) as null_count, \
          COUNT(DISTINCT {column}) as distinct_count, \
-         MIN({column}::text) as min_val, MAX({column}::text) as max_val FROM {quoted_table}"
+         MIN({column}) as min_val, MAX({column}) as max_val FROM {quoted_table}"
     );
 
     // The one query whose failure zeroes the whole column.
@@ -507,13 +506,17 @@ async fn profile_column(
     };
     let stats_row = stats.rows.first();
     let null_count = stats_row.map(|row| row_i64(row, "null_count")).unwrap_or(0);
-    let distinct_count = stats_row.map(|row| row_i64(row, "distinct_count")).unwrap_or(0);
+    let distinct_count = stats_row
+        .map(|row| row_i64(row, "distinct_count"))
+        .unwrap_or(0);
     let min_value = stats_row.and_then(|row| cell_opt(row, "min_val"));
     let max_value = stats_row.and_then(|row| cell_opt(row, "max_val"));
 
     let avg_value = if is_numeric_type(&col.data_type) {
         adapter
-            .query(&format!("SELECT AVG({column}::numeric)::text as avg_val FROM {quoted_table}"))
+            .query(&format!(
+                "SELECT AVG({column}) as avg_val FROM {quoted_table}"
+            ))
             .await
             .ok()
             .and_then(|raw| raw.rows.into_iter().next())
@@ -526,7 +529,7 @@ async fn profile_column(
 
     let top_values = adapter
         .query(&format!(
-            "SELECT {column}::text as val, COUNT(*) as cnt FROM {quoted_table} \
+            "SELECT {column} as val, COUNT(*) as cnt FROM {quoted_table} \
              WHERE {column} IS NOT NULL GROUP BY {column} ORDER BY cnt DESC LIMIT 5"
         ))
         .await

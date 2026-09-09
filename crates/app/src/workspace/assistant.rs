@@ -51,7 +51,10 @@ fn segments(text: &str) -> Vec<Segment> {
         if let Some((_, acc)) = code.as_mut() {
             if bare.trim_start().starts_with("```") {
                 let (runnable, acc) = code.take().unwrap();
-                out.push(Segment::Code { runnable, code: acc.trim_end().to_string() });
+                out.push(Segment::Code {
+                    runnable,
+                    code: acc.trim_end().to_string(),
+                });
             } else {
                 acc.push_str(line);
             }
@@ -68,7 +71,10 @@ fn segments(text: &str) -> Vec<Segment> {
     }
     // A block still open at the end is mid-stream: show it, don't offer to run.
     if let Some((_, acc)) = code {
-        out.push(Segment::Code { runnable: false, code: acc.trim_end().to_string() });
+        out.push(Segment::Code {
+            runnable: false,
+            code: acc.trim_end().to_string(),
+        });
     } else if !prose.trim().is_empty() {
         out.push(Segment::Text(prose.trim().to_string()));
     }
@@ -87,8 +93,11 @@ pub struct AssistantPanel {
     composer: Entity<AIComposer>,
     messages: Signal<Vec<ChatMsg>>,
     streaming: Signal<bool>,
-    /// Tokens the conversation has spent, accumulated across turns.
+    /// Token usage for the current request.
     usage: Signal<Usage>,
+    spent: Signal<f64>,
+    generation: Signal<u64>,
+    task: Option<tokio::task::AbortHandle>,
     /// Keeps the transcript pinned to the newest tokens while streaming.
     scroll: gpui::ScrollHandle,
 }
@@ -97,6 +106,12 @@ impl EventEmitter<AssistantEvent> for AssistantPanel {}
 
 impl AssistantPanel {
     pub fn new(app: AppState, state: WorkspaceState, cx: &mut Context<Self>) -> Self {
+        cx.observe(state.ai_open.entity(), |this, _, cx| {
+            if !this.state.ai_open.get(cx) {
+                this.stop(cx);
+            }
+        })
+        .detach();
         let composer = cx.new(|cx| {
             AIComposer::new(cx)
                 .size(Size::Sm)
@@ -110,13 +125,18 @@ impl AssistantPanel {
         watch(cx, &messages);
         watch(cx, &streaming);
         watch(cx, &usage);
+        let spent = Signal::new(cx, 0.0);
+        watch(cx, &spent);
+        let generation = Signal::new(cx, 0);
 
-        cx.subscribe(&composer, |this, _composer, event: &AIComposerEvent, cx| match event {
-            AIComposerEvent::Submit(text) => this.send(text.clone(), cx),
-            // Nothing to interrupt yet: `bridge::stream` owns the task and does
-            // not hand back a handle, so the button is only shown as state.
-            AIComposerEvent::Stop | AIComposerEvent::Attach | AIComposerEvent::Change(_) => {}
-        })
+        cx.subscribe(
+            &composer,
+            |this, _composer, event: &AIComposerEvent, cx| match event {
+                AIComposerEvent::Submit(text) => this.send(text.clone(), cx),
+                AIComposerEvent::Stop => this.stop(cx),
+                AIComposerEvent::Attach | AIComposerEvent::Change(_) => {}
+            },
+        )
         .detach();
 
         AssistantPanel {
@@ -126,16 +146,30 @@ impl AssistantPanel {
             messages,
             streaming,
             usage,
+            spent,
+            generation,
+            task: None,
             scroll: gpui::ScrollHandle::new(),
         }
     }
 
-    fn send(&self, prompt: String, cx: &mut gpui::App) {
+    fn send(&mut self, prompt: String, cx: &mut gpui::App) {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() || *self.streaming.read(cx) {
             return;
         }
 
+        if prompt.len() > 32 * 1024 {
+            self.app
+                .toasts
+                .error(cx, "Message too long", "Keep messages under 32 KiB.");
+            return;
+        }
+        self.messages.update(cx, |list| {
+            while list.len() > 40 || list.iter().map(|m| m.text.len()).sum::<usize>() > 256 * 1024 {
+                list.drain(..2.min(list.len()));
+            }
+        });
         let settings = self.app.settings.get(cx);
         let auth = AuthMode::parse(&settings.ai_auth_mode);
         let Some(credential) = self.app.host.ai_secret(&settings.ai_auth_mode) else {
@@ -146,58 +180,107 @@ impl AssistantPanel {
             );
             return;
         };
-        let config = AiConfig { model: settings.ai_model.clone(), auth };
+        let config = AiConfig {
+            model: settings.ai_model.clone(),
+            auth,
+        };
+        let rates =
+            ai::model_info(&config.model).map(|m| (m.input_per_million, m.output_per_million));
 
         // The request is the prior turns plus this prompt.
         let mut history: Vec<AiMessage> = self
             .messages
             .get(cx)
             .iter()
-            .map(|m| AiMessage { role: m.role, text: m.text.clone() })
+            .filter(|m| !m.text.is_empty())
+            .map(|m| AiMessage {
+                role: m.role,
+                text: m.text.clone(),
+            })
             .collect();
-        history.push(AiMessage { role: Role::User, text: prompt.clone() });
+        history.push(AiMessage {
+            role: Role::User,
+            text: prompt.clone(),
+        });
         let system = self.system_prompt(cx);
 
         // Show the user turn and an empty assistant turn to stream into.
         self.messages.update(cx, |list| {
-            list.push(ChatMsg { role: Role::User, text: prompt });
-            list.push(ChatMsg { role: Role::Assistant, text: String::new() });
+            list.push(ChatMsg {
+                role: Role::User,
+                text: prompt,
+            });
+            list.push(ChatMsg {
+                role: Role::Assistant,
+                text: String::new(),
+            });
         });
         self.streaming.set(cx, true);
-        self.composer.update(cx, |composer, cx| composer.set_busy(true, cx));
+        self.composer
+            .update(cx, |composer, cx| composer.set_busy(true, cx));
 
+        self.usage.set(cx, Usage::default());
+        let request = self.generation.get(cx) + 1;
+        self.generation.set(cx, request);
+        let generation = self.generation.clone();
+        let done_generation = generation.clone();
+        let spent = self.spent.clone();
+        let mut turn_cost = 0.0;
         let messages = self.messages.clone();
         let streaming = self.streaming.clone();
         let usage = self.usage.clone();
         let composer = self.composer.clone();
         let scroll = self.scroll.clone();
-        bridge::stream(
+        self.task = Some(bridge::stream(
             cx,
             move |tx| ai::stream_chat(config, credential, Some(system), history, tx),
-            move |event, cx| match event {
-                StreamEvent::Delta(text) => {
-                    messages.update(cx, |list| {
-                        if let Some(last) = list.last_mut() {
-                            last.text.push_str(&text);
-                        }
-                    });
-                    // Keep the freshest tokens in view as they arrive.
-                    scroll.scroll_to_bottom();
+            move |event, cx| {
+                if generation.get(cx) != request {
+                    return;
                 }
-                StreamEvent::Usage(reported) => {
-                    usage.update(cx, |total| total.merge(reported));
-                }
-                StreamEvent::Error(error) => messages.update(cx, |list| {
-                    if let Some(last) = list.last_mut() {
-                        last.text = format!("⚠ {error}");
+                match event {
+                    StreamEvent::Delta(text) => {
+                        messages.update(cx, |list| {
+                            if let Some(last) = list.last_mut() {
+                                last.text.push_str(&text);
+                            }
+                        });
+                        // Keep the freshest tokens in view as they arrive.
+                        scroll.scroll_to_bottom();
                     }
-                }),
+                    StreamEvent::Usage(reported) => {
+                        usage.update(cx, |total| total.merge(reported));
+                        if let Some((input, output)) = rates {
+                            let next = usage.read(cx).cost(input, output);
+                            spent.update(cx, |total| *total += next - turn_cost);
+                            turn_cost = next;
+                        }
+                    }
+                    StreamEvent::Error(error) => messages.update(cx, |list| {
+                        if let Some(last) = list.last_mut() {
+                            last.text.push_str(&format!("\n\nRequest failed: {error}"));
+                        }
+                    }),
+                }
             },
             move |cx| {
+                if done_generation.get(cx) != request {
+                    return;
+                }
                 streaming.set(cx, false);
                 composer.update(cx, |composer, cx| composer.set_busy(false, cx));
             },
-        );
+        ));
+    }
+
+    pub(super) fn stop(&mut self, cx: &mut gpui::App) {
+        self.generation.update(cx, |value| *value += 1);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.streaming.set(cx, false);
+        self.composer
+            .update(cx, |composer, cx| composer.set_busy(false, cx));
     }
 
     /// Seed the model with the connection's dialect and table list so it can
@@ -210,9 +293,18 @@ impl AssistantPanel {
             .as_ref()
             .map(|c| dialect_label(&c.kind))
             .unwrap_or("SQL");
-        let names: Vec<String> =
-            self.state.tables.get(cx).iter().map(|t| t.name.clone()).collect();
-        let schema = if names.is_empty() { "(no tables loaded)".to_string() } else { names.join(", ") };
+        let names: Vec<String> = self
+            .state
+            .tables
+            .get(cx)
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let schema = if names.is_empty() {
+            "(no tables loaded)".to_string()
+        } else {
+            names.join(", ")
+        };
         format!(
             "You are the SQL assistant built into Tables, a database client. The user is \
              connected to a {dialect} database. Available tables: {schema}. Help the user \
@@ -222,7 +314,9 @@ impl AssistantPanel {
         )
     }
 
-    fn clear(&self, cx: &mut gpui::App) {
+    fn clear(&mut self, cx: &mut gpui::App) {
+        self.stop(cx);
+        self.spent.set(cx, 0.0);
         self.messages.set(cx, Vec::new());
         self.usage.set(cx, Usage::default());
     }
@@ -248,7 +342,9 @@ impl AssistantPanel {
             .border_color(colors.border)
             .child(
                 div()
-                    .id(gpui::SharedString::from(format!("ai-code-{msg_idx}-{block}")))
+                    .id(gpui::SharedString::from(format!(
+                        "ai-code-{msg_idx}-{block}"
+                    )))
                     .overflow_x_scroll()
                     .font_family(crate::theme::MONO_FAMILY)
                     .text_size(px(11.0))
@@ -291,7 +387,13 @@ impl AssistantPanel {
     /// One turn. A reply that has not opened a fence yet streams through
     /// `AIMessage` itself; once it has, the body is built from its segments so
     /// the SQL can carry its actions.
-    fn turn(&self, index: usize, msg: &ChatMsg, streaming_now: bool, cx: &Context<Self>) -> gpui::AnyElement {
+    fn turn(
+        &self,
+        index: usize,
+        msg: &ChatMsg,
+        streaming_now: bool,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
         if msg.role == Role::User {
             return AIMessage::new(AIRole::User, msg.text.clone())
                 .size(Size::Sm)
@@ -328,7 +430,7 @@ impl AssistantPanel {
         }
         let model = self.app.settings.read(cx).ai_model.clone();
         let info = ai::model_info(&model)?;
-        let spent = usage.cost(info.input_per_million, info.output_per_million);
+        let spent = self.spent.get(cx);
         Some(
             Group::new()
                 .gap(Size::Xs)
@@ -353,12 +455,19 @@ fn dialect_label(kind: &str) -> &'static str {
     }
 }
 
+impl Drop for AssistantPanel {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 impl Render for AssistantPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = crate::theme::palette(cx);
         let streaming = *self.streaming.read(cx);
         let messages = self.messages.read(cx).clone();
-        let has_key = self.app.host.has_ai_secret(&self.app.settings.read(cx).ai_auth_mode);
 
         let header = div()
             .flex()
@@ -393,19 +502,23 @@ impl Render for AssistantPanel {
                             .variant(Variant::Subtle)
                             .size(Size::Sm)
                             .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.stop(cx);
                                 this.state.ai_open.set(cx, false)
                             })),
                     ),
             );
 
         let body = if messages.is_empty() {
-            let hint = if has_key {
-                "Ask me to write a query, explain a table, or debug SQL."
-            } else {
-                "Add an AI key in Settings (⌘,) → Assistant to get started."
-            };
+            let hint = "Ask about your database. Configure access in Settings (⌘,) → Assistant.";
             Center::new()
-                .child(Text::new(hint).size(Size::Xs).dimmed())
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .px(px(16.0))
+                        .child(Text::new(hint).size(Size::Xs).dimmed()),
+                )
                 .into_any_element()
         } else {
             let last = messages.len() - 1;

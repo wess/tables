@@ -10,7 +10,7 @@ until an Authenticode certificate is wired in.
 
 `scripts/windows.ps1 [-Arch x86_64]` writes to `dist/windows/`:
 
-- **`tables-<version>-windows-<arch>.zip`** — portable build: `tables.exe`.
+- **`tables-<version>-windows-<arch>.zip`** — portable build: `tables.exe` and the read-only `tablesmcp.exe` server.
   Unzip and run `tables.exe`.
 - **`tables-<version>-windows-<arch>.msi`** — WiX v4 installer (per-machine,
   Program Files + Start-menu shortcut). Best-effort: a WiX failure is
@@ -21,9 +21,8 @@ GitHub release on every version bump.
 
 ## Package managers
 
-Both manifests point at the release `.zip`. Their `version`, download `url`, and
-checksum are placeholders (`0.0.0` / zeroed hash) in git and are rewritten per
-release.
+Both manifests point at the release `.zip`. The Scoop manifest is updated after
+each release; the Chocolatey template uses placeholders filled during packaging.
 
 - **Scoop** (`scoop/tables.json`): the release workflow rewrites the version,
   URL, `extract_dir`, and SHA-256 and commits it back. Install once published:

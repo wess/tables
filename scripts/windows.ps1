@@ -38,7 +38,8 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 # --- build ----------------------------------------------------------------
 rustup target add $triple 2>&1 | Out-Null
-cargo build --release -p app --target $triple
+cargo build --locked --release -p app -p tablesmcp --target $triple
+if ($LASTEXITCODE -ne 0) { throw "Cargo build failed ($LASTEXITCODE)" }
 $bin = "target\$triple\release\tablesdev.exe"
 
 # --- staging tree (shared by the zip and the MSI harvest) ------------------
@@ -46,6 +47,7 @@ $stem = "tables-$version-windows-$Arch"
 $stage = Join-Path $out $stem
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item $bin (Join-Path $stage "tables.exe")
+Copy-Item "target\$triple\release\tablesmcp.exe" (Join-Path $stage "tablesmcp.exe")
 Copy-Item LICENSE, README.md $stage -ErrorAction SilentlyContinue
 
 # --- .zip ------------------------------------------------------------------
@@ -62,6 +64,7 @@ try {
         -define "StageDir=$stage" `
         -arch $wixArch `
         -out (Join-Path $out "$stem.msi")
+    if ($LASTEXITCODE -ne 0) { throw "WiX build failed ($LASTEXITCODE)" }
     Write-Host "[windows] -> $stem.msi"
 } catch {
     Write-Warning "[windows] MSI build failed (zip still produced): $_"

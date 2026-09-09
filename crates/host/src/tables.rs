@@ -79,19 +79,35 @@ fn write_stmt(
     col_types: &HashMap<String, String>,
     write: &RowWrite,
 ) -> (String, Vec<Value>) {
-    let mut b = Binder { dialect, col_types, params: Vec::new() };
+    let mut b = Binder {
+        dialect,
+        col_types,
+        params: Vec::new(),
+    };
     let sql = match write {
         RowWrite::Insert { table, row } => {
             let table = dialect.quote_ident(table);
             if row.is_empty() {
                 format!("INSERT INTO {table} DEFAULT VALUES")
             } else {
-                let cols = row.keys().map(|k| dialect.quote_ident(k)).collect::<Vec<_>>().join(", ");
-                let vals = row.iter().map(|(k, v)| b.token(k, v)).collect::<Vec<_>>().join(", ");
+                let cols = row
+                    .keys()
+                    .map(|k| dialect.quote_ident(k))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let vals = row
+                    .iter()
+                    .map(|(k, v)| b.token(k, v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("INSERT INTO {table} ({cols}) VALUES ({vals})")
             }
         }
-        RowWrite::Update { table, primary_key, changes } => {
+        RowWrite::Update {
+            table,
+            primary_key,
+            changes,
+        } => {
             // SET tokens are bound before the WHERE tokens, matching the order
             // the placeholders appear in the statement.
             let set = changes
@@ -100,11 +116,17 @@ fn write_stmt(
                 .collect::<Vec<_>>()
                 .join(", ");
             let where_clause = b.where_all(primary_key);
-            format!("UPDATE {} SET {set} WHERE {where_clause}", dialect.quote_ident(table))
+            format!(
+                "UPDATE {} SET {set} WHERE {where_clause}",
+                dialect.quote_ident(table)
+            )
         }
         RowWrite::Delete { table, primary_key } => {
             let where_clause = b.where_all(primary_key);
-            format!("DELETE FROM {} WHERE {where_clause}", dialect.quote_ident(table))
+            format!(
+                "DELETE FROM {} WHERE {where_clause}",
+                dialect.quote_ident(table)
+            )
         }
     };
     (sql, b.params)
@@ -144,18 +166,36 @@ impl Host {
         };
         let order_by = match &req.sort {
             Some(sort) => {
-                format!("ORDER BY {} {}", dialect.quote_ident(&sort.column), sort_dir(&sort.direction))
+                format!(
+                    "ORDER BY {} {}",
+                    dialect.quote_ident(&sort.column),
+                    sort_dir(&sort.direction)
+                )
             }
             None => String::new(),
         };
         // Pages are 1-based; guard page 0 so the offset can never underflow.
-        let offset = req.page.saturating_sub(1) * req.page_size;
+        if req.page_size == 0 || req.page_size > 1000 {
+            return Err("Page size must be between 1 and 1000".into());
+        }
+        let offset = req
+            .page
+            .saturating_sub(1)
+            .checked_mul(req.page_size)
+            .ok_or("Page offset is too large")?;
         let table = dialect.quote_ident(&req.table);
 
         let count = adapter
-            .exec_params(&format!("SELECT COUNT(*) as total FROM {table} {where_clause}"), &params)
+            .exec_params(
+                &format!("SELECT COUNT(*) as total FROM {table} {where_clause}"),
+                &params,
+            )
             .await?;
-        let total = count.rows.first().map(|row| row_i64(row, "total")).unwrap_or(0);
+        let total = count
+            .rows
+            .first()
+            .map(|row| row_i64(row, "total"))
+            .unwrap_or(0);
 
         let result = adapter
             .exec_params(
@@ -211,13 +251,18 @@ impl Host {
 
     /// An empty row inserts DEFAULT VALUES.
     pub async fn row_insert(&self, table: &str, row: &Row) -> Result<bool, String> {
+        self.confirm_write(&format!("Insert a row into {table}"))
+            .await?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
         let col_types = self.col_types(table).await;
         let (sql, params) = write_stmt(
             dialect,
             &col_types,
-            &RowWrite::Insert { table: table.to_string(), row: row.clone() },
+            &RowWrite::Insert {
+                table: table.to_string(),
+                row: row.clone(),
+            },
         );
         adapter.exec_params(&sql, &params).await?;
         Ok(true)
@@ -229,6 +274,8 @@ impl Host {
         primary_key: &Row,
         changes: &Row,
     ) -> Result<bool, String> {
+        self.confirm_write(&format!("Update a row in {table}"))
+            .await?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
         let col_types = self.col_types(table).await;
@@ -246,13 +293,18 @@ impl Host {
     }
 
     pub async fn row_delete(&self, table: &str, primary_key: &Row) -> Result<bool, String> {
+        self.confirm_write(&format!("Delete a row from {table}"))
+            .await?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
         let col_types = self.col_types(table).await;
         let (sql, params) = write_stmt(
             dialect,
             &col_types,
-            &RowWrite::Delete { table: table.to_string(), primary_key: primary_key.clone() },
+            &RowWrite::Delete {
+                table: table.to_string(),
+                primary_key: primary_key.clone(),
+            },
         );
         adapter.exec_params(&sql, &params).await?;
         Ok(true)
@@ -261,6 +313,8 @@ impl Host {
     /// Apply a reviewed batch of row writes atomically: all succeed or the whole
     /// batch rolls back. Column types are fetched once per distinct table.
     pub async fn apply_row_writes(&self, writes: &[RowWrite]) -> Result<u64, String> {
+        self.confirm_write(&format!("Apply {} staged row changes", writes.len()))
+            .await?;
         let adapter = self.active_adapter()?;
         let dialect = adapter.dialect();
         let mut cache: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -282,14 +336,23 @@ impl Host {
     }
 
     /// Reconnect the same connection to another database and make it active.
-    pub async fn switch_database(&self, connection_id: &str, database: &str) -> Result<bool, String> {
+    pub async fn switch_database(
+        &self,
+        connection_id: &str,
+        database: &str,
+    ) -> Result<bool, String> {
         let conn = connections::find(connection_id)
             .ok_or_else(|| format!("Connection not found: {connection_id}"))?;
         self.registry.disconnect(connection_id).await;
         self.invalidate_schema_cache();
         let mut config = conn.config();
         config.database = database.to_string();
-        self.registry.connect(&config).await?;
+        config.password = self.resolve_password(&conn);
+        if conn.safe_mode.as_deref() == Some("readonly") {
+            self.registry.connect_readonly(&config).await?;
+        } else {
+            self.registry.connect(&config).await?;
+        }
         self.set_active(connection_id);
         Ok(true)
     }
@@ -312,10 +375,17 @@ mod tests {
     fn insert_binds_scalars_and_keeps_null_as_keyword() {
         let write = RowWrite::Insert {
             table: "t".into(),
-            row: row(&[("id", json!(1)), ("name", json!("Bob")), ("note", Value::Null)]),
+            row: row(&[
+                ("id", json!(1)),
+                ("name", json!("Bob")),
+                ("note", Value::Null),
+            ]),
         };
         let (sql, params) = write_stmt(Dialect::Sqlite, &HashMap::new(), &write);
-        assert_eq!(sql, r#"INSERT INTO "t" ("id", "name", "note") VALUES (?, ?, NULL)"#);
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "t" ("id", "name", "note") VALUES (?, ?, NULL)"#
+        );
         assert_eq!(params, vec![json!(1), json!("Bob")]);
     }
 

@@ -1,6 +1,6 @@
 # Architecture
 
-Tables is a Cargo workspace with five layers. Dependencies point downward so the reusable core remains independent of gpui.
+Tables is a Cargo workspace with a shared service core. Dependencies point downward so the reusable core remains independent of gpui.
 
 ```text
 app → host → db → model
@@ -30,7 +30,20 @@ Arbitrary cells are decoded to `serde_json::Value` by matching driver type infor
 
 `app` is the only gpui-aware crate. A single bridge runs database futures on a process-wide multithread Tokio runtime and returns outcomes to the gpui thread through a oneshot channel.
 
-The root routes between Home and Workspace. Workspace state is shared across the sidebar, Data, Query, and Structure surfaces. Modals provide settings, comparison, diagrams, filters, insertion, review, inspection, charts, and database switching.
+The root routes between Home and Workspace. Workspace state is shared across the sidebar, Data, SQL editor, and Structure
+surfaces. Per-table view snapshots preserve staged changes without retaining
+complete inactive result sets. Tabs share the titlebar; each panel owns its toolbar. Modals provide settings, comparison, diagrams, filters, insertion, review, inspection, charts, and database switching.
+
+## MCP and assistant
+
+`tablesmcp` is a gpui-free stdio binary over `host`, using the saved connection
+store and credential resolution. It keeps one read-only connection and one
+in-flight database operation. Its four tools have explicit input, response,
+and execution-time limits.
+
+`ai` handles assistant HTTP streaming. A bounded channel delivers parsed events
+to the UI; cancellation aborts the request. Local metadata writes use temporary
+files and atomic replacement, with in-process locks around mutable collections.
 
 ## Important invariants
 

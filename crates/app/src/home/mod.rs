@@ -87,17 +87,20 @@ impl Home {
             conn
         });
         let form = cx.new(|cx| ConnectionForm::new(initial, cx));
-        cx.subscribe(&form, |this, _form, event: &ConnectionFormEvent, cx| match event {
-            ConnectionFormEvent::Cancel => {
-                this.form = None;
-                cx.notify();
-            }
-            ConnectionFormEvent::Save(conn) => {
-                this.save((**conn).clone(), cx);
-                this.form = None;
-                cx.notify();
-            }
-        })
+        cx.subscribe(
+            &form,
+            |this, _form, event: &ConnectionFormEvent, cx| match event {
+                ConnectionFormEvent::Cancel => {
+                    this.form = None;
+                    cx.notify();
+                }
+                ConnectionFormEvent::Save(conn) => {
+                    this.save((**conn).clone(), cx);
+                    this.form = None;
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         self.form = Some(form);
         cx.notify();
@@ -115,8 +118,11 @@ impl Home {
             move |result, cx| match result {
                 Ok(saved) => {
                     reload_into(host_reload, connections, loading, cx);
-                    let what =
-                        if saved.name.is_empty() { "Connection".to_string() } else { saved.name };
+                    let what = if saved.name.is_empty() {
+                        "Connection".to_string()
+                    } else {
+                        saved.name
+                    };
                     toasts.success(cx, &format!("{what} saved"), 1500);
                 }
                 Err(error) => toasts.error(cx, "Save failed", &error),
@@ -129,7 +135,9 @@ impl Home {
     fn new_from_url(&mut self, cx: &mut Context<Self>) {
         let text = cx.read_from_clipboard().and_then(|c| c.text());
         let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
-            self.state.toasts.error(cx, "Clipboard empty", "Copy a connection URL first.");
+            self.state
+                .toasts
+                .error(cx, "Clipboard empty", "Copy a connection URL first.");
             return;
         };
         match url::parse_conn_url(&text) {
@@ -225,29 +233,47 @@ impl Render for Home {
 
         let conns = self.connections.get(cx);
 
-        let header = Stack::new()
-            .align(Align::Center)
-            .gap(Size::Xs)
-            .child(ThemeIcon::new("▦").color(ColorName::Blue).size(Size::Xl))
-            .child(Text::new("Tables").size(Size::Lg).bold())
-            .child(Text::new("Open-source database client").size(Size::Xs).dimmed());
-
-        let new_button = Center::new().child(
-            Group::new()
-                .gap(Size::Xs)
-                .child(
-                    Button::new("new-connection", "New Connection")
-                        .variant(Variant::Light)
-                        .on_click(cx.listener(|this, _, _, cx| this.open_form(None, cx))),
-                )
-                .child(
-                    Button::new("new-from-url", "From URL")
-                        .variant(Variant::Subtle)
-                        .on_click(cx.listener(|this, _, _, cx| this.new_from_url(cx))),
-                ),
-        );
-
-        let mut page = Stack::new().gap(Size::Lg).child(header).child(new_button);
+        let header = div()
+            .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(24.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .gap(px(6.0))
+                    .child(Text::new("Connections").size(Size::Xl).medium())
+                    .child(
+                        Text::new("Choose a database to open your workspace.")
+                            .size(Size::Sm)
+                            .dimmed(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        Button::new("new-from-url", "From URL")
+                            .size(Size::Sm)
+                            .color(ColorName::Gray)
+                            .variant(Variant::Default)
+                            .on_click(cx.listener(|this, _, _, cx| this.new_from_url(cx))),
+                    )
+                    .child(
+                        Button::new("new-connection", "New connection")
+                            .size(Size::Sm)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_form(None, cx))),
+                    ),
+            );
+        let mut page = Stack::new().gap(Size::Lg).child(header);
 
         if conns.is_empty() {
             page = page.child(
@@ -279,16 +305,30 @@ impl Render for Home {
                 if multi {
                     section = section.child(Text::new(name.to_uppercase()).size(Size::Xs).dimmed());
                 }
-                let mut grid = SimpleGrid::new(3).spacing(Size::Sm);
+                let colors = crate::theme::palette(cx);
+                let mut grid = div()
+                    .w_full()
+                    .bg(colors.bg_surface)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded(px(8.0));
                 for conn in &group {
                     grid = grid.child(self.card(conn, cx));
                 }
                 list = list.child(section.child(grid));
             }
-            page = page.child(Center::new().child(div().w_full().max_w(px(900.0)).child(list)));
+            page = page.child(list);
         }
 
-        root = root.child(div().w_full().px(px(24.0)).py(px(40.0)).child(page));
+        root = root.child(
+            div()
+                .flex()
+                .justify_center()
+                .w_full()
+                .px(px(24.0))
+                .py(px(32.0))
+                .child(div().w_full().max_w(px(900.0)).child(page)),
+        );
 
         if let Some(form) = &self.form {
             root = root.child(form.clone());
