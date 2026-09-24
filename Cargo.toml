@@ -23,7 +23,7 @@ authors = ["Wess Cope <opensource@wess.io>"]
 gpui = "0.2.2"
 # Released guise rather than a git ref: a version a release can be rebuilt from.
 # No webview either — Tables has no embedded-browser surface, so drop the wry dep.
-guise-ui = { version = "=1.5.3", default-features = false }
+guise-ui = { version = "=1.7.0", default-features = false }
 
 # Async database engine. sqlx drives all three client engines (Postgres,
 # MySQL, SQLite) over one tokio runtime; the gpui app bridges to it.
