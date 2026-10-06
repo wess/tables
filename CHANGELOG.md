@@ -2,6 +2,14 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.3.2 — 2026-10-06
+
+Use Ctrl shortcuts on Linux and Windows for app commands, with matching
+shortcut hints. Clipboard shortcuts and Edit menu commands now route through
+the focused text field or SQL editor, including undo and redo.
+
+Add clipboard and shortcut regression tests to both Linux architecture builds.
+
 ## 0.3.1 — 2026-09-29
 
 Built on guise-ui 1.9.1, which adds scrollbars to scrollable panes and makes

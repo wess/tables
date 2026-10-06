@@ -219,6 +219,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Test keyboard shortcuts
+        run: cargo test -p app --test shortcuts --locked
+
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
 

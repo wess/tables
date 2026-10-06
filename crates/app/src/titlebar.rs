@@ -70,7 +70,7 @@ pub fn update_button(cx: &App) -> ActionIcon {
 
 pub fn settings_button() -> ActionIcon {
   ActionIcon::new("title-settings", IconName::Settings)
-    .label("Settings (⌘,)")
+    .label(crate::shortcuts::hint("Settings (⌘,)", "Settings (Ctrl+,)"))
     .size(Size::Sm)
     .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenSettings), cx))
 }

@@ -63,7 +63,10 @@ impl QueryPanel {
             Editor::new(cx)
                 .language(Language::Sql)
                 .rows(10)
-                .placeholder("SELECT * FROM …   (⌘⏎ to run)")
+                .placeholder(crate::shortcuts::hint(
+                    "SELECT * FROM …   (⌘⏎ to run)",
+                    "SELECT * FROM …   (Ctrl+Enter to run)",
+                ))
         });
         let fav_name = cx.new(|cx| {
             TextInput::new(cx)
@@ -378,7 +381,10 @@ impl Render for QueryPanel {
             .child(
                 ActionIcon::new("query-format", IconName::AlignLeft)
                     .size(Size::Sm)
-                    .label("Format SQL (⌘⇧F)")
+                    .label(crate::shortcuts::hint(
+                        "Format SQL (⌘⇧F)",
+                        "Format SQL (Ctrl+Shift+F)",
+                    ))
                     .disabled(self.editor.read(cx).text().trim().is_empty())
                     .on_click(cx.listener(|this, _, _, cx| this.format_current(cx))),
             )

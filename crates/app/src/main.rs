@@ -5,11 +5,13 @@
 //! async DB layer is reached through the tokio bridge.
 
 mod about;
+mod actions;
 mod bridge;
 mod home;
 mod root;
 mod settings;
 mod sheet;
+mod shortcuts;
 mod theme;
 mod titlebar;
 mod update;
@@ -25,95 +27,12 @@ mod toasts;
 
 use gpui::prelude::*;
 use gpui::{
-    px, size, App, Application, Bounds, KeyBinding, Menu, MenuItem, OsAction, SharedString,
-    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    px, size, App, Application, Bounds, Menu, MenuItem, SharedString, TitlebarOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 use guise::prelude::*;
 
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct NewConnection;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct RunQuery;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct OpenPalette;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct Quit;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct ShowAbout;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct CheckForUpdates;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct Hide;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct HideOthers;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct ShowAll;
-
-// Standard edit-menu actions. They carry the OS role (cut/copy/paste/select-all)
-// so the menu integrates with the focused text field; the app dispatches no
-// handler for them (text inputs handle the clipboard via their own keybindings).
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct Cut;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct Copy;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct Paste;
-
-#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-#[action(namespace = tables, no_json)]
-pub struct SelectAll;
-
-// Workspace actions dispatched from the menu bar (handled on the Workspace root
-// when a connection is open; no-ops on the home screen).
-macro_rules! ws_actions {
-    ($($name:ident),* $(,)?) => {
-        $(
-            #[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
-            #[action(namespace = tables, no_json)]
-            pub struct $name;
-        )*
-    };
-}
-ws_actions!(
-    NewTable,
-    FormatSql,
-    ExplainQuery,
-    RunTransaction,
-    OpenSessions,
-    BackupDatabase,
-    RestoreDatabase,
-    RefreshTables,
-    SchemaCompare,
-    ErDiagram,
-    OpenExtensions,
-    ToggleAi,
-    ToggleFilters,
-    ToggleInspector,
-    OpenSettings,
-    ShowDocs,
-);
+pub use actions::*;
 
 fn menu(name: &'static str, items: Vec<MenuItem>) -> Menu {
     Menu {
@@ -155,10 +74,13 @@ fn menus() -> Vec<Menu> {
         menu(
             "Edit",
             vec![
-                MenuItem::os_action("Cut", Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", Paste, OsAction::Paste),
-                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+                MenuItem::action("Undo", guise::actions::Undo),
+                MenuItem::action("Redo", guise::actions::Redo),
+                MenuItem::separator(),
+                MenuItem::action("Cut", guise::actions::Cut),
+                MenuItem::action("Copy", guise::actions::Copy),
+                MenuItem::action("Paste", guise::actions::Paste),
+                MenuItem::action("Select All", guise::actions::SelectAll),
             ],
         ),
         menu(
@@ -202,17 +124,7 @@ fn main() {
         let settings = host::Host::new().settings();
         theme::build(theme::scheme(&settings.theme, cx)).init(cx);
 
-        cx.bind_keys([
-            KeyBinding::new("cmd-n", NewConnection, None),
-            KeyBinding::new("cmd-p", OpenPalette, None),
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-h", Hide, None),
-            KeyBinding::new("alt-cmd-h", HideOthers, None),
-            KeyBinding::new("cmd-,", OpenSettings, None),
-            KeyBinding::new("cmd-shift-r", RefreshTables, None),
-            KeyBinding::new("cmd-shift-f", FormatSql, None),
-            KeyBinding::new("cmd-e", ExplainQuery, None),
-        ]);
+        cx.bind_keys(shortcuts::bindings());
         cx.set_menus(menus());
         cx.on_action::<Quit>(|_, cx| cx.quit());
         cx.on_action::<Hide>(|_, cx| cx.hide());

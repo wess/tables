@@ -176,7 +176,10 @@ impl AssistantPanel {
             self.app.toasts.error(
                 cx,
                 "No AI credential",
-                "Add an API key or subscription token in Settings (⌘,) → Assistant.",
+                crate::shortcuts::hint(
+                    "Add an API key or subscription token in Settings (⌘,) → Assistant.",
+                    "Add an API key or subscription token in Settings (Ctrl+,) → Assistant.",
+                ),
             );
             return;
         };
@@ -510,7 +513,10 @@ impl Render for AssistantPanel {
             );
 
         let body = if messages.is_empty() {
-            let hint = "Ask about your database. Configure access in Settings (⌘,) → Assistant.";
+            let hint = crate::shortcuts::hint(
+                "Ask about your database. Configure access in Settings (⌘,) → Assistant.",
+                "Ask about your database. Configure access in Settings (Ctrl+,) → Assistant.",
+            );
             Center::new()
                 .child(
                     div()

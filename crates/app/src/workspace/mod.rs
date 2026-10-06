@@ -383,7 +383,10 @@ impl Render for Workspace {
             .child(
                 ActionIcon::new("open-document", IconName::Plus)
                     .size(Size::Sm)
-                    .label("Open table or command (⌘P)")
+                    .label(crate::shortcuts::hint(
+                        "Open table or command (⌘P)",
+                        "Open table or command (Ctrl+P)",
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
             )
             .child(crate::titlebar::drag())
@@ -451,7 +454,10 @@ impl Render for Workspace {
             )
             .child(
                 ActionIcon::new("ws-search", IconName::Search)
-                    .label("Command palette (⌘P)")
+                    .label(crate::shortcuts::hint(
+                        "Command palette (⌘P)",
+                        "Command palette (Ctrl+P)",
+                    ))
                     .size(Size::Sm)
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
             );
