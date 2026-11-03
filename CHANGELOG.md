@@ -2,6 +2,13 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.3.3 — 2026-11-03
+
+- Refresh compatible locked dependencies and pin every GitHub Action to an
+  immutable commit, with weekly dependency tracking for future action updates.
+- MySQL support still inherits the unpatched RSA timing advisory through
+  `sqlx-mysql`; PostgreSQL and SQLite do not use that dependency path.
+
 ## 0.3.2 — 2026-10-06
 
 Use Ctrl shortcuts on Linux and Windows for app commands, with matching
