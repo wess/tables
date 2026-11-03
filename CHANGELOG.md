@@ -2,6 +2,11 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.3.5 — 2026-11-03
+
+- Tighten the temporary `libc` compatibility pin to 0.2.189, the newest
+  release that still provides `ENOATTR` on both Linux architectures we ship.
+
 ## 0.3.4 — 2026-11-03
 
 - Pin `libc` below 0.2.191 until the transitive `xattr` dependency used by
