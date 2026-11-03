@@ -2,6 +2,11 @@
 
 Notable changes to Tables. Versions follow [semver](https://semver.org).
 
+## 0.3.4 — 2026-11-03
+
+- Pin `libc` below 0.2.191 until the transitive `xattr` dependency used by
+  GPUI is compatible with the removed Linux `ENOATTR` alias.
+
 ## 0.3.3 — 2026-11-03
 
 - Refresh compatible locked dependencies and pin every GitHub Action to an

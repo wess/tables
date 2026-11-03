@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "ai"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "futures",
  "reqwest",
@@ -102,7 +102,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ai",
  "anyhow",
@@ -1396,7 +1396,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "db"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -2758,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "host"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3282,9 +3282,9 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "libc"
-version = "0.2.191"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libdbus-sys"
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "chrono",
  "serde",
@@ -5925,7 +5925,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "store"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "dirs 6.0.0",
  "keyring",
@@ -6209,7 +6209,7 @@ dependencies = [
 
 [[package]]
 name = "tablesmcp"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "db",
  "futures",
