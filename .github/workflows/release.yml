@@ -17,7 +17,7 @@ jobs:
       changed: ${{ steps.diff.outputs.changed }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # Release when the workspace version has no matching tag yet. Idempotent
       # for both push and manual dispatch (a HEAD~1 diff would miss dispatches
@@ -44,7 +44,7 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Create git tag
         run: |
@@ -89,7 +89,7 @@ jobs:
       # card says "Released <date>" instead of "Development build".
       TABLES_RELEASE: "1"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: "v${{ needs.check-version.outputs.version }}"
 
@@ -192,7 +192,7 @@ jobs:
     env:
       TABLES_RELEASE: "1"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: "v${{ needs.check-version.outputs.version }}"
 
@@ -267,7 +267,7 @@ jobs:
           echo "sha_darwin_arm64=${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew tap
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: wess/homebrew-packages
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -324,7 +324,7 @@ jobs:
     env:
       TABLES_RELEASE: "1"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: "v${{ needs.check-version.outputs.version }}"
 
@@ -387,7 +387,7 @@ jobs:
     if: needs.check-version.outputs.changed == 'true'
     continue-on-error: true
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Update Scoop manifest
         run: |
